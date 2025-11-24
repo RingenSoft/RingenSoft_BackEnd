@@ -44,7 +44,6 @@ class EmbarcacionResponse(BaseModel):
     capacidad_bodega: float
     velocidad_promedio: float
     consumo: float
-    # Campos Nuevos del Dataset
     material: Optional[str] = "Desconocido"
     tripulacion: Optional[int] = 0
     anio_fabricacion: Optional[int] = 0
@@ -52,16 +51,13 @@ class EmbarcacionResponse(BaseModel):
     progreso: int
     destino: str
     eta: str
-    
     class Config: from_attributes = True
 
-# --- NUEVO: Esquema ampliado para crear embarcación ---
 class EmbarcacionCreate(BaseModel):
     nombre: str
     capacidad_bodega: float
     velocidad_promedio: float
     consumo: float = 1.5
-    # Nuevos campos requeridos
     material: str
     tripulacion: int
     anio_fabricacion: int
@@ -73,12 +69,14 @@ class KpiResponse(BaseModel):
     ahorro: str
     alertas: int
 
-# --- ESQUEMAS VRP ---
+# --- ESQUEMAS VRP (MODIFICADO) ---
 class RutaRequest(BaseModel):
     id_embarcacion: str
     capacidad_actual: Optional[float] = None
     combustible_actual: Optional[float] = None
     velocidad_personalizada: Optional[float] = None
+    # SOLO QUEDA PUERTO SALIDA (El retorno es automático)
+    puerto_salida_id: str
 
 class NodoRuta(BaseModel):
     id_nodo: str
@@ -96,26 +94,30 @@ class RutaResponse(BaseModel):
     tiempo_estimado_horas: float
     secuencia_ruta: List[NodoRuta]
     mensaje: str
+    resumen_texto: str 
 
 class ChartData(BaseModel):
     label: str
     value: float
-    color: Optional[str] = None # Para el frontend
+    color: Optional[str] = None
 
 class TopBarco(BaseModel):
     ranking: int
     nombre: str
     captura_total: float
-    eficiencia: float # TM por viaje
+    eficiencia: float
+
+class MaterialData(BaseModel):
+    material: str
+    cantidad: int
+    porcentaje: float
 
 class ReporteGeneral(BaseModel):
-    # Gráfico de Barras (Pesca últimos 7 días)
     tendencia_semanal: List[ChartData]
-    # Gráfico de Donas (Estado de flota)
     estado_flota: List[ChartData]
-    # Tabla de Líderes
     top_barcos: List[TopBarco]
-    # Tarjetas de Resumen
+    distribucion_materiales: List[MaterialData]
     total_toneladas_detectadas: float
     zonas_mas_activas: str
-    ahorro_carbono: float # Kg de CO2 evitados
+    ahorro_carbono: float
+    flota_capacidad_total: float
