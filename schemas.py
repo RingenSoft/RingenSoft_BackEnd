@@ -121,3 +121,7 @@ class ReporteGeneral(BaseModel):
     zonas_mas_activas: str
     ahorro_carbono: float
     flota_capacidad_total: float
+
+# --- AGREGAR AL FINAL DE schemas.py ---
+class EstadoUpdate(BaseModel):
+    estado: str
