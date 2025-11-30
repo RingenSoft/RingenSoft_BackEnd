@@ -16,6 +16,11 @@ from . import models, schemas, database, auth
 
 app = FastAPI(title="Ringensoft API Real", version="5.0.0 - Production Ready")
 
+# --- CONFIGURACIÓN VISUAL ---
+# Mueve los peces a la izquierda sin tocar los puertos.
+# Si siguen en tierra, sube a 2.0 o 2.5
+OFFSET_VISUAL_BANCOS = 4.5
+
 # --- SEGURIDAD ---
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
@@ -41,7 +46,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Crear tablas en DB al iniciar
+# Crear tablas
 models.Base.metadata.create_all(bind=database.engine)
 
 # --- VARIABLES GLOBALES ---
@@ -71,18 +76,33 @@ def haversine(lat1, lon1, lat2, lon2):
     return R * c
 
 def es_en_mar(lat, lon):
+    # 1. Filtro general
     if lat > -3.0 or lat < -19.0: return False
-    lon_limite = ((lat + 3) / -1.5 - 80.5) - 0.8 
+    
+    # 2. DEFINICIÓN DEL LITORAL POR TRAMOS (Tu lógica mejorada)
+    if lat > -6.0:
+        # TRAMO 1: NORTE (Tumbes a Bayóvar)
+        lon_costa = -81.0 + (lat + 6) * 0.2 
+        
+    elif lat > -14.0:
+        # TRAMO 2: CENTRO (Bayóvar a Paracas)
+        pendiente = (-76.0 - (-81.0)) / (-14.0 - (-6.0)) 
+        lon_costa = -81.0 + (lat + 6) * pendiente
+        
+    else:
+        # TRAMO 3: SUR (Paracas a Tacna)
+        pendiente = (-70.5 - (-76.0)) / (-18.3 - (-14.0)) 
+        lon_costa = -76.0 + (lat + 14) * pendiente
+
+    # Margen pequeño solo para limpiar ruido extremo
+    margen_tierra = 0.1 
+    lon_limite = lon_costa - margen_tierra
+    
     return lon < lon_limite
 
 def encontrar_archivo(nombre_parcial):
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    rutas = [
-        os.path.join(base_dir, 'dataset'),
-        base_dir,
-        os.path.join(base_dir, '..'),
-        os.path.join(base_dir, '..', 'dataset')
-    ]
+    rutas = [os.path.join(base_dir, 'dataset'), base_dir, os.path.join(base_dir, '..'), os.path.join(base_dir, '..', 'dataset')]
     for d in rutas:
         if os.path.exists(d):
             for f in os.listdir(d):
@@ -90,7 +110,7 @@ def encontrar_archivo(nombre_parcial):
                     return os.path.join(d, f)
     return None
 
-# --- CARGA DE DATOS (STARTUP) ---
+# --- CARGA DE DATOS ---
 @app.on_event("startup")
 def load_data():
     global df_bancos, df_puertos, matriz_distancias
@@ -103,17 +123,16 @@ def load_data():
             df = pd.read_csv(f_bancos) if f_bancos.endswith('.csv') else pd.read_excel(f_bancos)
             df.columns = [c.strip() for c in df.columns]
             cols = {c.lower(): c for c in df.columns}
-            c_lat = cols.get('latitud')
-            c_lon = cols.get('longitud')
+            c_lat, c_lon = cols.get('latitud'), cols.get('longitud')
             if c_lat and c_lon:
                 df[c_lat] = pd.to_numeric(df[c_lat], errors='coerce')
                 df[c_lon] = pd.to_numeric(df[c_lon], errors='coerce')
                 df = df.dropna(subset=[c_lat, c_lon])
+                # Aplicamos tu filtro por tramos
                 mask = df.apply(lambda r: es_en_mar(r[c_lat], r[c_lon]), axis=1)
                 df_bancos = df[mask].copy()
                 print(f"✅ DATASET: {len(df_bancos)} Bancos validados en MAR.")
-        except Exception as e: 
-            print(f"❌ Error cargando bancos: {e}")
+        except Exception as e: print(f"❌ Error bancos: {e}")
 
     # 2. CARGA DE PUERTOS
     f_desc = encontrar_archivo("descargas")
@@ -136,16 +155,14 @@ def load_data():
                         lat, lon = ptos_reales[p_limpio]
                         lista.append({'id': p_limpio, 'nombre': p_limpio, 'latitud': lat, 'longitud': lon})
                         nombres_procesados.add(p_limpio)
-            
             if not lista:
                 for k, v in ptos_reales.items():
                     lista.append({'id': k, 'nombre': k, 'latitud': v[0], 'longitud': v[1]})
-            
             df_puertos = pd.DataFrame(lista)
-            print(f"✅ DATASET: {len(df_puertos)} Puertos geolocalizados.")
+            print(f"✅ DATASET: {len(df_puertos)} Puertos activos.")
         except: pass
 
-    # 3. SEEDER DE FLOTA
+    # 3. SEEDER FLOTA
     db = database.SessionLocal()
     try:
         count_system = db.query(models.Embarcacion).filter(models.Embarcacion.id_embarcacion.like("SYSTEM%")).count()
@@ -157,24 +174,18 @@ def load_data():
                 df_excel.columns = [c.strip() for c in df_excel.columns]
                 df_excel = df_excel.fillna(0)
                 cols = {c.lower(): c for c in df_excel.columns}
-                
                 batch = []
                 for idx, r in df_excel.iterrows():
                     sys_id = f"SYSTEM-{idx:04d}"
-                    
                     tipo_casco = str(r.get(cols.get('tipo de casco'), 'Nave')).upper()
                     nombre_generado = f"Ringen-{idx+1:03d} {tipo_casco[:3]}" 
-                    
                     nuevo = models.Embarcacion(
-                        id_embarcacion=sys_id,
-                        nombre=nombre_generado,
+                        id_embarcacion=sys_id, nombre=nombre_generado,
                         capacidad_bodega=float(r.get(cols.get('capacidad de carga (tm)'), 0)),
                         velocidad_promedio=float(r.get(cols.get('velocidad promedio (nudos)'), 12)),
                         consumo_combustible=float(r.get(cols.get('consumo combustible (l/km)'), 1.5)),
-                        material_casco=tipo_casco,
-                        tripulacion_maxima=int(r.get(cols.get('tripulación máxima'), 10)),
-                        anio_fabricacion=int(r.get(cols.get('año de fabricación'), 2010)),
-                        owner_id=None
+                        material_casco=tipo_casco, tripulacion_maxima=int(r.get(cols.get('tripulación máxima'), 10)),
+                        anio_fabricacion=int(r.get(cols.get('año de fabricación'), 2010)), owner_id=None
                     )
                     batch.append(nuevo)
                     if len(batch) >= 100:
@@ -185,34 +196,24 @@ def load_data():
 
     #####################################################################################
     # [ALGORITMO 1] PRE-PROCESAMIENTO DE COSTOS (SIMULACIÓN FLOYD-WARSHALL)
-    # Explicación para el profesor:
-    # "Aquí pre-calculamos la matriz de distancias completa (O(N^2)) al iniciar.
-    #  Esto evita tener que calcular la fórmula Haversine millones de veces durante
-    #  la ejecución del algoritmo VRP, reduciendo la latencia de respuesta a O(1)."
     #####################################################################################
     if not df_bancos.empty:
         print("🧮 ALGORITMO: Calculando matriz de costos (Pre-procesamiento)...")
         cols_b = {c.lower(): c for c in df_bancos.columns}
-        
         c_id = cols_b.get('id banco', 'id')
-        c_lat = cols_b.get('latitud', 'latitud') 
-        c_lon = cols_b.get('longitud', 'longitud')
-
-        muestra = df_bancos.head(300).to_dict('records') 
+        c_lat, c_lon = cols_b.get('latitud', 'latitud'), cols_b.get('longitud', 'longitud')
+        muestra = df_bancos.head(300).to_dict('records')
         
-        # Agregamos todos los puertos a la matriz
         if not df_puertos.empty:
             for _, p in df_puertos.iterrows():
                 muestra.append({c_id: p['id'], c_lat: p['latitud'], c_lon: p['longitud']})
-        
+
         for i in range(len(muestra)):
             id_o = str(muestra[i].get(c_id))
             lat_o = muestra[i].get(c_lat); lon_o = muestra[i].get(c_lon)
-            
             for j in range(i + 1, len(muestra)):
                 id_d = str(muestra[j].get(c_id))
                 lat_d = muestra[j].get(c_lat); lon_d = muestra[j].get(c_lon)
-                
                 d = haversine(lat_o, lon_o, lat_d, lon_d)
                 matriz_distancias[(id_o, id_d)] = d
                 matriz_distancias[(id_d, id_o)] = d
@@ -222,25 +223,16 @@ def load_data():
 def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(database.get_db)):
     if db.query(models.Usuario).filter(models.Usuario.username == usuario.username).first():
         raise HTTPException(status_code=400, detail="Usuario ya existe")
-    nuevo = models.Usuario(
-        username=usuario.username, 
-        password_hash=auth.encriptar_password(usuario.password), 
-        nombre_completo=usuario.nombre_completo
-    )
+    nuevo = models.Usuario(username=usuario.username, password_hash=auth.encriptar_password(usuario.password), nombre_completo=usuario.nombre_completo)
     db.add(nuevo); db.commit()
-    return {"mensaje": "Usuario creado exitosamente"}
+    return {"mensaje": "Usuario creado"}
 
 @app.post("/auth/login", response_model=schemas.Token)
 def login(usuario: schemas.UsuarioLogin, db: Session = Depends(database.get_db)):
     user = db.query(models.Usuario).filter(models.Usuario.username == usuario.username).first()
     if not user or not auth.verificar_password(usuario.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-    return {
-        "access_token": auth.crear_access_token({"sub": user.username}), 
-        "token_type": "bearer", 
-        "nombre_usuario": user.nombre_completo, 
-        "rol": user.rol
-    }
+    return {"access_token": auth.crear_access_token({"sub": user.username}), "token_type": "bearer", "nombre_usuario": user.nombre_completo, "rol": user.rol}
 
 # --- ENDPOINTS DATOS ---
 @app.get("/puertos", response_model=List[schemas.PuertoResponse])
@@ -249,12 +241,9 @@ def get_puertos_api():
     if not df_puertos.empty:
         for _, r in df_puertos.iterrows():
             x, y = map_gps_to_css(r['latitud'], r['longitud'])
+            # Puertos NO se mueven (no aplicamos OFFSET)
             if -10 <= x <= 110 and -10 <= y <= 110:
-                res.append({
-                    "id": str(r['id']), "nombre": r['nombre'], 
-                    "latitud": r['latitud'], "longitud": r['longitud'], 
-                    "x": x, "y": y
-                })
+                res.append({"id": str(r['id']), "nombre": r['nombre'], "latitud": r['latitud'], "longitud": r['longitud'], "x": x, "y": y})
     return res
 
 @app.get("/bancos", response_model=List[schemas.BancoResponse])
@@ -266,27 +255,23 @@ def get_bancos_api():
     for _, r in muestra.iterrows():
         lat = r[cols.get('latitud')]; lon = r[cols.get('longitud')]
         x, y = map_gps_to_css(lat, lon)
+        
+        # --- AQUÍ ESTÁ EL TRUCO VISUAL ---
+        # Movemos SOLO los bancos a la izquierda
+        x = x - OFFSET_VISUAL_BANCOS 
+        
         if 0 <= x <= 100 and 0 <= y <= 100:
-            res.append({
-                "id": int(r[cols.get('id banco', 'id')]), 
-                "latitud": lat, "longitud": lon, 
-                "toneladas": float(r[cols.get('toneladas estimadas', 'toneladas')]), 
-                "x": x, "y": y
-            })
+            res.append({"id": int(r[cols.get('id banco', 'id')]), "latitud": lat, "longitud": lon, "toneladas": float(r[cols.get('toneladas estimadas', 'toneladas')]), "x": x, "y": y})
     return res
 
-# --- GESTIÓN FLOTA (CRUD) ---
+# --- GESTIÓN FLOTA ---
 @app.get("/embarcaciones", response_model=List[schemas.EmbarcacionResponse])
 def get_flota_api(current_user: models.Usuario = Depends(get_current_user), db: Session = Depends(database.get_db)):
-    mis_barcos = db.query(models.Embarcacion).filter(
-        models.Embarcacion.owner_id == current_user.id_usuario
-    ).all()
-    
+    mis_barcos = db.query(models.Embarcacion).filter(models.Embarcacion.owner_id == current_user.id_usuario).all()
     res = []
     for b in mis_barcos:
         res.append({
-            "id_embarcacion": b.id_embarcacion, 
-            "nombre": b.nombre,
+            "id_embarcacion": b.id_embarcacion, "nombre": b.nombre,
             "capacidad_bodega": b.capacidad_bodega, "velocidad_promedio": b.velocidad_promedio,
             "consumo": b.consumo_combustible, "material": b.material_casco,
             "tripulacion": b.tripulacion_maxima, "anio_fabricacion": b.anio_fabricacion,
@@ -298,56 +283,21 @@ def get_flota_api(current_user: models.Usuario = Depends(get_current_user), db: 
 def crear_embarcacion(barco: schemas.EmbarcacionCreate, current_user: models.Usuario = Depends(get_current_user), db: Session = Depends(database.get_db)):
     count = db.query(models.Embarcacion).filter(models.Embarcacion.owner_id == current_user.id_usuario).count()
     nuevo_id = f"U{current_user.id_usuario}-{count + 1:03d}"
-    
-    nuevo = models.Embarcacion(
-        id_embarcacion=nuevo_id, nombre=barco.nombre,
-        capacidad_bodega=barco.capacidad_bodega, velocidad_promedio=barco.velocidad_promedio,
-        consumo_combustible=barco.consumo, material_casco=barco.material,
-        tripulacion_maxima=barco.tripulacion, anio_fabricacion=barco.anio_fabricacion,
-        owner_id=current_user.id_usuario, estado="EN_PUERTO"
-    )
+    nuevo = models.Embarcacion(id_embarcacion=nuevo_id, nombre=barco.nombre, capacidad_bodega=barco.capacidad_bodega, velocidad_promedio=barco.velocidad_promedio, consumo_combustible=barco.consumo, material_casco=barco.material, tripulacion_maxima=barco.tripulacion, anio_fabricacion=barco.anio_fabricacion, owner_id=current_user.id_usuario, estado="EN_PUERTO")
     db.add(nuevo); db.commit(); db.refresh(nuevo)
-    return {
-        "id_embarcacion": nuevo.id_embarcacion, "nombre": nuevo.nombre,
-        "capacidad_bodega": nuevo.capacidad_bodega, "velocidad_promedio": nuevo.velocidad_promedio,
-        "consumo": nuevo.consumo_combustible, "material": nuevo.material_casco,
-        "tripulacion": nuevo.tripulacion_maxima, "anio_fabricacion": nuevo.anio_fabricacion,
-        "estado": "EN_PUERTO", "progreso": 0, "destino": "-", "eta": "-"
-    }
+    return { "id_embarcacion": nuevo.id_embarcacion, "nombre": nuevo.nombre, "capacidad_bodega": nuevo.capacidad_bodega, "velocidad_promedio": nuevo.velocidad_promedio, "consumo": nuevo.consumo_combustible, "material": nuevo.material_casco, "tripulacion": nuevo.tripulacion_maxima, "anio_fabricacion": nuevo.anio_fabricacion, "estado": "EN_PUERTO", "progreso": 0, "destino": "-", "eta": "-" }
 
 @app.patch("/embarcaciones/{id_embarcacion}/estado", response_model=schemas.EmbarcacionResponse)
 def actualizar_estado_barco(id_embarcacion: str, estado_data: schemas.EstadoUpdate, db: Session = Depends(database.get_db), current_user: models.Usuario = Depends(get_current_user)):
-    barco = db.query(models.Embarcacion).filter(
-        models.Embarcacion.id_embarcacion == id_embarcacion,
-        models.Embarcacion.owner_id == current_user.id_usuario
-    ).first()
-    
-    if not barco:
-        raise HTTPException(status_code=404, detail="Barco no encontrado o no te pertenece")
-    
+    barco = db.query(models.Embarcacion).filter(models.Embarcacion.id_embarcacion == id_embarcacion, models.Embarcacion.owner_id == current_user.id_usuario).first()
+    if not barco: raise HTTPException(status_code=404, detail="Barco no encontrado")
     estados_validos = ["EN_PUERTO", "MANTENIMIENTO", "EN_RUTA", "EN_ALTAMAR"]
-    if estado_data.estado not in estados_validos:
-        raise HTTPException(status_code=400, detail="Estado no válido")
-        
-    barco.estado = estado_data.estado
-    db.commit()
-    db.refresh(barco)
-    
-    return {
-        "id_embarcacion": barco.id_embarcacion, "nombre": barco.nombre,
-        "capacidad_bodega": barco.capacidad_bodega, "velocidad_promedio": barco.velocidad_promedio,
-        "consumo": barco.consumo_combustible, "material": barco.material_casco,
-        "tripulacion": barco.tripulacion_maxima, "anio_fabricacion": barco.anio_fabricacion,
-        "estado": barco.estado, "progreso": 0, "destino": "-", "eta": "-"
-    }
+    if estado_data.estado not in estados_validos: raise HTTPException(status_code=400, detail="Estado no válido")
+    barco.estado = estado_data.estado; db.commit(); db.refresh(barco)
+    return { "id_embarcacion": barco.id_embarcacion, "nombre": barco.nombre, "capacidad_bodega": barco.capacidad_bodega, "velocidad_promedio": barco.velocidad_promedio, "consumo": barco.consumo_combustible, "material": barco.material_casco, "tripulacion": barco.tripulacion_maxima, "anio_fabricacion": barco.anio_fabricacion, "estado": barco.estado, "progreso": 0, "destino": "-", "eta": "-" }
 
 #####################################################################################
 # [ALGORITMO 3] METAHEURÍSTICA DE BÚSQUEDA LOCAL (2-OPT)
-# Explicación para el profesor:
-# "Esta es la función de refinamiento. Toma una ruta generada por el Greedy y
-#  busca cruces ineficientes (nudos). Si encuentra uno, intercambia las aristas
-#  para 'desenredar' la ruta y reducir la distancia total. Se repite hasta que
-#  no se pueden hacer más mejoras (Óptimo Local)."
 #####################################################################################
 def optimizar_2opt(ruta, funcion_distancia):
     mejor_ruta = ruta
@@ -370,7 +320,6 @@ def optimizar_2opt(ruta, funcion_distancia):
 
 @app.post("/optimizar-ruta/", response_model=schemas.RutaResponse)
 def calcular_ruta(req: schemas.RutaRequest, db: Session = Depends(database.get_db)):
-    # ... (Carga de datos del barco)
     barco = db.query(models.Embarcacion).filter(models.Embarcacion.id_embarcacion == req.id_embarcacion).first()
     if not barco: raise HTTPException(status_code=404, detail="Barco no encontrado")
 
@@ -384,7 +333,6 @@ def calcular_ruta(req: schemas.RutaRequest, db: Session = Depends(database.get_d
     if "FIBRA" in material: factor_material = 0.90 
     elif "MADERA" in material: factor_material = 0.95
     elif "ALUMINIO" in material: factor_material = 0.92
-    
     factor_tripulacion = 1.0 + (tripulacion * 0.005) 
 
     pto_salida = df_puertos[df_puertos['id'] == req.puerto_salida_id].iloc[0]
@@ -402,9 +350,6 @@ def calcular_ruta(req: schemas.RutaRequest, db: Session = Depends(database.get_d
 
     #################################################################################
     # [ALGORITMO 2] HEURÍSTICA CONSTRUCTIVA VORAZ (GREEDY)
-    # Explicación: "Construimos la ruta paso a paso. Estando en un punto, 
-    # buscamos el banco de peces más cercano (menor costo) que tenga recursos.
-    # Repetimos esto hasta llenar la bodega del barco."
     #################################################################################
     ruta_actual = [nodo_inicio]
     carga_actual = 0
@@ -446,8 +391,6 @@ def calcular_ruta(req: schemas.RutaRequest, db: Session = Depends(database.get_d
 
     #################################################################################
     # [APLICACIÓN DE ALGORITMO 3] EJECUCIÓN DE 2-OPT
-    # Explicación: "Aquí llamamos a la función de mejora. Si la ruta Greedy tiene
-    # 4 o más nodos, intentamos optimizarla."
     #################################################################################
     if len(ruta_actual) > 3:
         ruta_optima, _ = optimizar_2opt(ruta_actual, get_dist_func)
@@ -458,8 +401,6 @@ def calcular_ruta(req: schemas.RutaRequest, db: Session = Depends(database.get_d
 
     #################################################################################
     # [FÍSICA] CÁLCULO DE CONSUMO (POST-PROCESAMIENTO)
-    # Explicación: "No es parte del ruteo per se, pero es el modelo matemático de costos.
-    # Aplicamos la fórmula de Carga Dinámica: un barco lleno consume más que uno vacío."
     #################################################################################
     secuencia_ruta = []
     carga_acum = 0
@@ -471,6 +412,12 @@ def calcular_ruta(req: schemas.RutaRequest, db: Session = Depends(database.get_d
         carga_acum += recogida
         
         x, y = map_gps_to_css(nodo['lat'], nodo['lon'])
+        
+        # --- AQUÍ ESTÁ EL TRUCO VISUAL EN LA RUTA ---
+        # Si es un banco, aplicamos el mismo desfase para que la línea coincida con el punto
+        if nodo['tipo'] == 'BANCO':
+            x = x - OFFSET_VISUAL_BANCOS 
+        
         secuencia_ruta.append({
             "id_nodo": f"{nodo['id']}", "tipo": nodo['tipo'],
             "latitud": nodo['lat'], "longitud": nodo['lon'],
