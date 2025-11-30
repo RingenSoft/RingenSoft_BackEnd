@@ -320,6 +320,7 @@ def optimizar_2opt(ruta, funcion_distancia):
 
 @app.post("/optimizar-ruta/", response_model=schemas.RutaResponse)
 def calcular_ruta(req: schemas.RutaRequest, db: Session = Depends(database.get_db)):
+    # ... (CARGA DE DATOS IGUAL QUE ANTES) ...
     barco = db.query(models.Embarcacion).filter(models.Embarcacion.id_embarcacion == req.id_embarcacion).first()
     if not barco: raise HTTPException(status_code=404, detail="Barco no encontrado")
 
@@ -348,9 +349,7 @@ def calcular_ruta(req: schemas.RutaRequest, db: Session = Depends(database.get_d
             "toneladas": float(row[cols_b.get('toneladas estimadas')])
         })
 
-    #################################################################################
-    # [ALGORITMO 2] HEURÍSTICA CONSTRUCTIVA VORAZ (GREEDY)
-    #################################################################################
+    # [FASE 1] GREEDY
     ruta_actual = [nodo_inicio]
     carga_actual = 0
     visitados = set()
@@ -359,28 +358,18 @@ def calcular_ruta(req: schemas.RutaRequest, db: Session = Depends(database.get_d
         actual = ruta_actual[-1]
         mejor_cand = None
         min_dist = float('inf')
-        
         for cand in candidatos:
             if cand['id'] in visitados: continue
-            
             d = matriz_distancias.get((str(actual['id']), cand['id']))
             if d is None: d = haversine(actual['lat'], actual['lon'], cand['lat'], cand['lon'])
-            
             if d < min_dist:
                 min_dist = d
                 mejor_cand = cand
-        
         if mejor_cand is None or min_dist > 600: break
-        
         pesca = min(mejor_cand['toneladas'], cap_max - carga_actual)
         if pesca <= 0: break 
-        
-        cand_copy = mejor_cand.copy()
-        cand_copy['carga_recogida'] = pesca
-        ruta_actual.append(cand_copy)
-        visitados.add(mejor_cand['id'])
-        carga_actual += pesca
-        
+        cand_copy = mejor_cand.copy(); cand_copy['carga_recogida'] = pesca
+        ruta_actual.append(cand_copy); visitados.add(mejor_cand['id']); carga_actual += pesca
         if carga_actual >= cap_max: break
 
     ruta_actual.append(nodo_final)
@@ -389,34 +378,31 @@ def calcular_ruta(req: schemas.RutaRequest, db: Session = Depends(database.get_d
         d = matriz_distancias.get((str(n1['id']), str(n2['id'])))
         return d if d else haversine(n1['lat'], n1['lon'], n2['lat'], n2['lon'])
 
-    #################################################################################
-    # [APLICACIÓN DE ALGORITMO 3] EJECUCIÓN DE 2-OPT
-    #################################################################################
+    # --- NUEVO: CALCULAR DISTANCIA BASE (ANTES DE OPTIMIZAR) ---
+    distancia_greedy = sum(get_dist_func(ruta_actual[i], ruta_actual[i+1]) for i in range(len(ruta_actual)-1))
+
+    # [FASE 2] 2-OPT (OPTIMIZACIÓN)
     if len(ruta_actual) > 3:
-        ruta_optima, _ = optimizar_2opt(ruta_actual, get_dist_func)
-        if ruta_optima[0]['id'] != nodo_inicio['id']:
-             ruta_optima = ruta_actual 
+        ruta_optima, dist_total_final = optimizar_2opt(ruta_actual, get_dist_func)
+        if ruta_optima[0]['id'] != nodo_inicio['id']: ruta_optima = ruta_actual; dist_total_final = distancia_greedy
     else:
         ruta_optima = ruta_actual
+        dist_total_final = distancia_greedy
 
-    #################################################################################
-    # [FÍSICA] CÁLCULO DE CONSUMO (POST-PROCESAMIENTO)
-    #################################################################################
+    # --- CÁLCULO DE MEJORA ---
+    ahorro_km = max(0, distancia_greedy - dist_total_final)
+    porcentaje_mejora = (ahorro_km / distancia_greedy * 100) if distancia_greedy > 0 else 0
+
+    # [FASE 3] CONSUMO Y FORMATEO
     secuencia_ruta = []
     carga_acum = 0
-    distancia_total = 0
     consumo_total = 0
     
     for i, nodo in enumerate(ruta_optima):
         recogida = nodo.get('carga_recogida', 0)
         carga_acum += recogida
-        
         x, y = map_gps_to_css(nodo['lat'], nodo['lon'])
-        
-        # --- AQUÍ ESTÁ EL TRUCO VISUAL EN LA RUTA ---
-        # Si es un banco, aplicamos el mismo desfase para que la línea coincida con el punto
-        if nodo['tipo'] == 'BANCO':
-            x = x - OFFSET_VISUAL_BANCOS 
+        if nodo['tipo'] == 'BANCO': x = x - OFFSET_VISUAL_BANCOS 
         
         secuencia_ruta.append({
             "id_nodo": f"{nodo['id']}", "tipo": nodo['tipo'],
@@ -425,35 +411,34 @@ def calcular_ruta(req: schemas.RutaRequest, db: Session = Depends(database.get_d
         })
         
         if i < len(ruta_optima) - 1:
-            siguiente = ruta_optima[i+1]
-            dist = get_dist_func(nodo, siguiente)
-            distancia_total += dist
-            
+            dist = get_dist_func(nodo, ruta_optima[i+1])
             factor_carga = 1.0 + (0.5 * (carga_acum / cap_max))
             consumo_tramo = dist * consumo_base * factor_material * factor_tripulacion * factor_carga
             consumo_total += consumo_tramo
 
-    tiempo_hrs = distancia_total / (vel * 1.852)
+    tiempo_hrs = dist_total_final / (vel * 1.852)
     
+    # --- RESUMEN ENRIQUECIDO PARA EL PROFESOR ---
     resumen = (
-        f"OPERACIÓN CICLO CERRADO\n"
-        f"• Puerto Base: {pto_salida['nombre']} \n"
-        f"• Nave: {barco.nombre} ({material}) \n"
-        f"• Carga Obtenida: {round(carga_acum, 2)} TM \n"
-        f"• Consumo Total: {round(consumo_total, 1)} Galones\n"
-        f"• Eficiencia: {round(distancia_total/len(ruta_optima), 1)} km/tramo"
+        f"📊 ANÁLISIS DE EFICIENCIA ALGORÍTMICA\n"
+        f"----------------------------------------\n"
+        f"• Distancia Base (Greedy): {round(distancia_greedy, 2)} km\n"
+        f"• Distancia Optimizada (2-Opt): {round(dist_total_final, 2)} km\n"
+        f"✅ MEJORA OBTENIDA: -{round(porcentaje_mejora, 2)}% ({round(ahorro_km, 2)} km ahorrados)\n\n"
+        f"📋 DETALLES OPERATIVOS\n"
+        f"• Consumo Est.: {round(consumo_total, 1)} Galones\n"
+        f"• Carga Final: {round(carga_acum, 2)} TM"
     )
 
     return {
         "id_embarcacion": req.id_embarcacion,
-        "distancia_total_km": round(distancia_total, 2),
+        "distancia_total_km": round(dist_total_final, 2),
         "carga_total_tm": round(carga_acum, 2),
         "tiempo_estimado_horas": round(tiempo_hrs, 2),
         "secuencia_ruta": secuencia_ruta,
-        "mensaje": "Ruta de retorno optimizada.",
+        "mensaje": "Optimización completada con éxito.",
         "resumen_texto": resumen
     }
-
 # --- DASHBOARD FINAL ---
 @app.get("/reportes/dashboard", response_model=schemas.ReporteGeneral)
 def get_reportes_dashboard(db: Session = Depends(database.get_db)):
