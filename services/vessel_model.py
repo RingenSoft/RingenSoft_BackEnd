@@ -1,3 +1,6 @@
+from datetime import datetime
+
+
 def calcular_autonomia_real(embarcacion: dict, combustible_pct: float = 1.0) -> dict:
     """
     Calcula parámetros reales de operación según estado de la embarcación.
@@ -9,7 +12,7 @@ def calcular_autonomia_real(embarcacion: dict, combustible_pct: float = 1.0) -> 
     tripulacion = embarcacion.get("tripulacion_max", 6)
 
     # Factor de degradación por antigüedad (1% por año, máx 20%)
-    anios_uso = max(0, 2025 - anio)
+    anios_uso = max(0, datetime.now().year - anio)
     factor_edad = max(0.80, 1.0 - anios_uso * 0.01)
 
     # Factor de carga por tripulación (cada persona ~0.5% más consumo)

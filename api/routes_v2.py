@@ -210,22 +210,6 @@ async def get_current_user(
     return user
 
 
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme),
-    db: AsyncSession = Depends(get_db)
-):
-    token = credentials.credentials  # esto extrae el string del token
-    payload = auth.decodificar_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Token inválido o expirado")
-    username = payload.get("sub")
-    result = await db.execute(select(Usuario).where(Usuario.username == username))
-    user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=401, detail="Usuario no encontrado")
-    return user
-
-
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -314,6 +298,7 @@ class CapturaReport(BaseModel):
     captura_real_tm: float
     especie:         str = "ANCHOVETA"
     notas:           Optional[str] = None
+    id_ruta:         Optional[int] = None   # si se provee, actualiza esa ruta
 
 
 @router.post("/captura/reportar")
@@ -322,25 +307,43 @@ async def reportar_captura(
     current_user: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """El pescador reporta cuánto capturó al regresar al puerto."""
-    clima = await obtener_condiciones_mar(-9.07, -77.0)
+    """
+    Reporta la captura real de una salida.
+    - Si se envía id_ruta: actualiza la captura de esa ruta existente.
+    - Si no se envía id_ruta: crea un registro independiente de captura.
+    """
+    if req.id_ruta is not None:
+        result = await db.execute(
+            select(HistorialRuta).where(HistorialRuta.id_ruta == req.id_ruta)
+        )
+        ruta = result.scalar_one_or_none()
+        if not ruta:
+            raise HTTPException(status_code=404, detail="Ruta no encontrada")
+        ruta.captura_real_tm = req.captura_real_tm
+        await db.commit()
+        return {
+            "mensaje":    "Captura actualizada correctamente",
+            "id_ruta":    req.id_ruta,
+            "captura_tm": req.captura_real_tm,
+            "especie":    req.especie,
+        }
 
+    # Sin id_ruta: registro independiente de captura (sin ruta pre-calculada)
     nueva_ruta = HistorialRuta(
         id_embarcacion     = req.id_embarcacion,
-        distancia_total_km = 0,
-        combustible_usado  = 0,
-        carga_estimada_tm  = 0,
+        distancia_total_km = None,
+        combustible_usado  = None,
+        carga_estimada_tm  = None,
         captura_real_tm    = req.captura_real_tm,
-        condicion_olas_m   = clima["mar"]["altura_olas_m"],
         especie_objetivo   = req.especie,
     )
     db.add(nueva_ruta)
     await db.commit()
 
     return {
-        "mensaje":       "Captura registrada correctamente",
-        "captura_tm":    req.captura_real_tm,
-        "especie":       req.especie,
+        "mensaje":    "Captura registrada correctamente",
+        "captura_tm": req.captura_real_tm,
+        "especie":    req.especie,
     }
 
 
