@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .database import Base
@@ -18,11 +18,16 @@ class Puerto(Base):
 # 2. USUARIOS
 class Usuario(Base):
     __tablename__ = "usuarios"
-    id_usuario      = Column(Integer, primary_key=True, index=True)
-    username        = Column(String(50), unique=True, index=True, nullable=False)
-    password_hash   = Column(String(255), nullable=False)
-    nombre_completo = Column(String(100))
-    rol             = Column(String(20), default="PESCADOR")
+    id_usuario        = Column(Integer, primary_key=True, index=True)
+    username          = Column(String(50), unique=True, index=True, nullable=False)
+    password_hash     = Column(String(255), nullable=False)
+    nombre_completo   = Column(String(100))
+    rol               = Column(String(20), default="PESCADOR")
+    zona_habitual     = Column(String(20), nullable=True)
+    tipo_pescador     = Column(String(50), nullable=True)
+    anos_experiencia  = Column(Integer, nullable=True)
+    licencia_pesca    = Column(String(100), nullable=True)
+    telefono          = Column(String(20), nullable=True)
 
     mis_embarcaciones = relationship("Embarcacion", back_populates="owner")
 
@@ -60,6 +65,12 @@ class HistorialRuta(Base):
     condicion_viento   = Column(Float, nullable=True)  # km/h al salir
     temp_mar_c         = Column(Float, nullable=True)  # °C al salir
     especie_objetivo   = Column(String(50), nullable=True)
+    # Campos enriquecidos para ML
+    fish_score_promedio  = Column(Float, nullable=True)
+    zonas_visitadas_num  = Column(Integer, nullable=True)
+    tiempo_total_horas   = Column(Float, nullable=True)
+    clorofila_promedio   = Column(Float, nullable=True)
+    ruta_json            = Column(JSON, nullable=True)   # lista completa de nodos
 
     embarcacion = relationship("Embarcacion")
 
@@ -76,7 +87,35 @@ class Avistamiento(Base):
     id_usuario  = Column(Integer, ForeignKey("usuarios.id_usuario"), nullable=True)
 
 
-# 6. PLANES DE VIAJE
+# 6. MENSAJES COMUNIDAD
+class MensajeComunidad(Base):
+    __tablename__ = "mensajes_comunidad"
+    id         = Column(Integer, primary_key=True, index=True)
+    texto      = Column(String(500), nullable=False)
+    tipo       = Column(String(20), default="GENERAL")
+    autor      = Column(String(100), nullable=False)
+    id_usuario = Column(Integer, ForeignKey("usuarios.id_usuario"), nullable=True)
+    fecha      = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# 7. MANTENIMIENTOS
+class Mantenimiento(Base):
+    __tablename__ = "mantenimientos"
+    id                  = Column(Integer, primary_key=True, index=True)
+    id_embarcacion      = Column(String(50), ForeignKey("embarcaciones.id_embarcacion"), nullable=False)
+    nombre_embarcacion  = Column(String(100), nullable=True)
+    fecha               = Column(String(20), nullable=False)
+    tipo                = Column(String(50), default="PREVENTIVO")
+    descripcion         = Column(String(500), nullable=False)
+    costo               = Column(Float, default=0.0)
+    proxima_revision    = Column(String(20), nullable=True)
+    id_usuario          = Column(Integer, ForeignKey("usuarios.id_usuario"), nullable=True)
+    fecha_creado        = Column(DateTime(timezone=True), server_default=func.now())
+
+    embarcacion = relationship("Embarcacion")
+
+
+# 7. PLANES DE VIAJE
 class PlanViaje(Base):
     __tablename__ = "planes_viaje"
     id               = Column(Integer, primary_key=True, index=True)

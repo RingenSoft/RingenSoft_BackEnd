@@ -1,16 +1,18 @@
 
 
 import asyncio
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from backend.database import get_db
 from backend import auth
-from backend.models import Usuario, Embarcacion, HistorialRuta, Avistamiento, PlanViaje
+from backend.models import Usuario, Embarcacion, HistorialRuta, Avistamiento, PlanViaje, Mantenimiento, MensajeComunidad
 from backend.services.weather_service import obtener_condiciones_mar
 from backend.services.ocean_service import obtener_datos_zona
 from backend.services.fish_grid import (
@@ -21,6 +23,7 @@ from backend.services.fish_score import calcular_scores_zona, seleccionar_mejore
 from backend.services.route_optimizer import optimizar_ruta
 
 router = APIRouter(prefix="/api/v2", tags=["v2"])
+limiter = Limiter(key_func=get_remote_address)
 
 
 # --- SCHEMAS ---
@@ -73,8 +76,22 @@ async def get_puertos():
     return {"puertos": PUERTOS_PERU}
 
 
+@router.get("/pronostico")
+async def get_pronostico(
+    lat: float = Query(..., example=-9.07),
+    lon: float = Query(..., example=-78.59),
+):
+    """Pronóstico horario de olas y viento para las próximas 48h + mejor ventana para salir."""
+    from backend.services.weather_service import obtener_pronostico_48h
+    try:
+        return await obtener_pronostico_48h(lat, lon)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/ruta-optima")
-async def post_ruta_optima(req: RutaRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit("10/minute")
+async def post_ruta_optima(request: Request, req: RutaRequest, db: AsyncSession = Depends(get_db)):
     """
     Calcula la ruta óptima de pesca para una embarcación.
     Usa datos reales de satélite (NASA/NOAA) y algoritmo VRP + 2-opt.
@@ -166,15 +183,22 @@ async def post_ruta_optima(req: RutaRequest, db: AsyncSession = Depends(get_db))
 
         # 10. Guardar en historial si hubo zonas visitadas
         if resultado.get("zonas_visitadas", 0) > 0:
+            zonas_nodos = [n for n in resultado.get("ruta", []) if n["tipo"] == "ZONA_PESCA"]
+            clorofila_vals = [n["clorofila"] for n in zonas_nodos if n.get("clorofila") is not None]
             nueva_ruta = HistorialRuta(
-                id_embarcacion     = req.id_embarcacion,
-                distancia_total_km = resultado["distancia_total_km"],
-                combustible_usado  = resultado["combustible_usado_l"],
-                carga_estimada_tm  = resultado["carga_estimada_tm"],
-                condicion_olas_m   = altura_olas,
-                condicion_viento   = clima["viento"]["velocidad_kmh"],
-                temp_mar_c         = scored[0].get("temperatura_c") if scored else None,
-                especie_objetivo   = especie,
+                id_embarcacion      = req.id_embarcacion,
+                distancia_total_km  = resultado["distancia_total_km"],
+                combustible_usado   = resultado["combustible_usado_l"],
+                carga_estimada_tm   = resultado["carga_estimada_tm"],
+                condicion_olas_m    = altura_olas,
+                condicion_viento    = clima["viento"]["velocidad_kmh"],
+                temp_mar_c          = scored[0].get("temperatura_c") if scored else None,
+                especie_objetivo    = especie,
+                fish_score_promedio = resultado.get("fish_score_promedio"),
+                zonas_visitadas_num = resultado.get("zonas_visitadas"),
+                tiempo_total_horas  = resultado.get("tiempo_total_horas"),
+                clorofila_promedio  = round(sum(clorofila_vals) / len(clorofila_vals), 4) if clorofila_vals else None,
+                ruta_json           = resultado.get("ruta"),
             )
             db.add(nueva_ruta)
             await db.commit()
@@ -191,6 +215,115 @@ async def post_ruta_optima(req: RutaRequest, db: AsyncSession = Depends(get_db))
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/rutas-comparadas")
+@limiter.limit("5/minute")
+async def post_rutas_comparadas(request: Request, req: RutaRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Calcula 3 rutas alternativas (equilibrada, máxima captura, mínimo combustible)
+    para que el capitán elija la que mejor se ajuste a sus objetivos.
+    """
+    puerto = get_puerto(req.id_puerto)
+    if not puerto:
+        raise HTTPException(status_code=404, detail=f"Puerto '{req.id_puerto}' no encontrado.")
+
+    especie = req.especie.upper()
+    if especie not in ["ANCHOVETA", "BONITO", "CABALLA", "JUREL"]:
+        raise HTTPException(status_code=400, detail="Especie inválida.")
+
+    embarcacion = {
+        "velocidad_promedio": req.velocidad_nudos   or 10.0,
+        "consumo_hora":       req.consumo_hora       or 20.0,
+        "autonomia_horas":    req.autonomia_horas    or 24.0,
+        "capacidad_bodega":   req.capacidad_bodega   or 15.0,
+        "anio_fabricacion":   req.anio_fabricacion   or 2015,
+        "tripulacion_max":    req.tripulacion        or 6,
+    }
+    combustible_pct = max(0.1, min(1.0, req.combustible_pct))
+
+    try:
+        clima = await obtener_condiciones_mar(puerto["lat"], puerto["lon"])
+        if not clima["navegacion_segura"]:
+            return {"status": "BLOQUEADO", "alerta": clima["alerta"], "rutas": None}
+
+        radio_km = calcular_radio_km(
+            embarcacion["velocidad_promedio"],
+            embarcacion["autonomia_horas"],
+            combustible_pct,
+        )
+        grilla   = generar_grilla()
+        puntos   = filtrar_por_radio(grilla, puerto["lat"], puerto["lon"], radio_km)
+        muestra  = puntos[:20]
+        scored   = await calcular_scores_zona(muestra, especie, puerto["lat"], puerto["lon"])
+        mejores  = seleccionar_mejores_zonas(scored, top_n=req.top_zonas, score_minimo=20.0) or scored[:3]
+
+        altura_olas = clima["mar"]["altura_olas_m"]
+
+        # Intentar obtener corrientes para las zonas (sin bloquear si falla)
+        corrientes = {}
+        try:
+            from backend.services.currents_service import obtener_corriente
+            tasks = {(z["lat"], z["lon"]): obtener_corriente(z["lat"], z["lon"]) for z in mejores}
+            import asyncio as _asyncio
+            resultados_cor = await _asyncio.gather(*tasks.values(), return_exceptions=True)
+            for key, res in zip(tasks.keys(), resultados_cor):
+                if not isinstance(res, Exception):
+                    corrientes[key] = res
+        except Exception:
+            pass
+
+        rutas = []
+        for modo in ["equilibrado", "max_captura", "min_combustible"]:
+            r = optimizar_ruta(
+                puerto=puerto,
+                zonas=mejores,
+                embarcacion=embarcacion,
+                combustible_pct=combustible_pct,
+                especie=especie,
+                altura_olas=altura_olas,
+                modo=modo,
+                corrientes=corrientes,
+            )
+            rutas.append(r)
+
+        return {
+            "status":            "OK",
+            "alerta":            clima["alerta"],
+            "radio_operacion_km": radio_km,
+            "puntos_evaluados":  len(muestra),
+            "rutas":             rutas,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- ENDPOINTS ML ---
+
+@router.post("/ml/entrenar")
+async def ml_entrenar(db: AsyncSession = Depends(get_db)):
+    """Entrena o re-entrena el modelo ML con los datos históricos disponibles."""
+    try:
+        from backend.services.ml_service import entrenar_modelo
+        resultado = await entrenar_modelo(db)
+        return resultado
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/ml/estado")
+async def ml_estado():
+    """Retorna el estado actual del modelo ML (samples, R², fecha de entrenamiento)."""
+    try:
+        from backend.services.ml_service import estado_modelo
+        return estado_modelo()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # --- AUTH ---
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 oauth2_scheme = HTTPBearer()
@@ -289,6 +422,41 @@ async def get_historial(
                 "especie":        r.especie_objetivo,
                 "condicion_olas": r.condicion_olas_m,
                 "temp_mar":       r.temp_mar_c,
+                "id_embarcacion": r.id_embarcacion,
+                "fish_score":     r.fish_score_promedio,
+                "tiempo_horas":   r.tiempo_total_horas,
+            }
+            for r in rutas
+        ]
+    }
+
+
+@router.get("/historial/pendientes")
+async def get_historial_pendientes(
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Rutas calculadas que aún no tienen captura real reportada."""
+    result = await db.execute(
+        select(HistorialRuta)
+        .where(HistorialRuta.captura_real_tm.is_(None))
+        .where(HistorialRuta.carga_estimada_tm.isnot(None))
+        .order_by(HistorialRuta.fecha_calculo.desc())
+        .limit(20)
+    )
+    rutas = result.scalars().all()
+    return {
+        "total": len(rutas),
+        "rutas": [
+            {
+                "id":             r.id_ruta,
+                "fecha":          r.fecha_calculo.isoformat() if r.fecha_calculo else None,
+                "especie":        r.especie_objetivo or "—",
+                "distancia_km":   r.distancia_total_km,
+                "carga_estimada": r.carga_estimada_tm,
+                "id_embarcacion": r.id_embarcacion or "—",
+                "fish_score":     r.fish_score_promedio,
+                "tiempo_horas":   r.tiempo_total_horas,
             }
             for r in rutas
         ]
@@ -779,3 +947,208 @@ async def eliminar_plan(
     await db.delete(plan)
     await db.commit()
     return {"mensaje": "Plan eliminado", "id": id_plan}
+
+
+# --- MANTENIMIENTOS ---
+class MantenimientoCreate(BaseModel):
+    id_embarcacion:   str
+    nombre_embarcacion: Optional[str] = None
+    fecha:            str
+    tipo:             str = "PREVENTIVO"
+    descripcion:      str
+    costo:            float = 0.0
+    proxima_revision: Optional[str] = None
+
+@router.get("/mantenimientos")
+async def get_mantenimientos(
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Lista los registros de mantenimiento del usuario."""
+    result = await db.execute(
+        select(Mantenimiento)
+        .where(Mantenimiento.id_usuario == current_user.id_usuario)
+        .order_by(Mantenimiento.fecha_creado.desc())
+    )
+    items = result.scalars().all()
+    return [
+        {
+            "id":                 m.id,
+            "id_embarcacion":     m.id_embarcacion,
+            "nombre_embarcacion": m.nombre_embarcacion,
+            "fecha":              m.fecha,
+            "tipo":               m.tipo,
+            "descripcion":        m.descripcion,
+            "costo":              m.costo,
+            "proxima_revision":   m.proxima_revision,
+        }
+        for m in items
+    ]
+
+@router.post("/mantenimientos")
+async def crear_mantenimiento(
+    req: MantenimientoCreate,
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Registra un nuevo mantenimiento para una embarcación."""
+    nuevo = Mantenimiento(
+        id_embarcacion     = req.id_embarcacion,
+        nombre_embarcacion = req.nombre_embarcacion,
+        fecha              = req.fecha,
+        tipo               = req.tipo,
+        descripcion        = req.descripcion,
+        costo              = req.costo,
+        proxima_revision   = req.proxima_revision,
+        id_usuario         = current_user.id_usuario,
+    )
+    db.add(nuevo)
+    await db.commit()
+    await db.refresh(nuevo)
+    return {"id": nuevo.id, "mensaje": "Mantenimiento registrado"}
+
+@router.delete("/mantenimientos/{id_mant}")
+async def eliminar_mantenimiento(
+    id_mant: int,
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Elimina un registro de mantenimiento."""
+    result = await db.execute(
+        select(Mantenimiento).where(
+            Mantenimiento.id == id_mant,
+            Mantenimiento.id_usuario == current_user.id_usuario
+        )
+    )
+    item = result.scalar_one_or_none()
+    if not item:
+        raise HTTPException(status_code=404, detail="Registro no encontrado")
+    await db.delete(item)
+    await db.commit()
+    return {"mensaje": "Mantenimiento eliminado", "id": id_mant}
+
+
+# --- PERFIL EXTENDIDO ---
+class PerfilUpdate(BaseModel):
+    zona_habitual:    Optional[str]   = None
+    tipo_pescador:    Optional[str]   = None
+    anos_experiencia: Optional[int]   = None
+    licencia_pesca:   Optional[str]   = None
+    telefono:         Optional[str]   = None
+
+@router.get("/perfil")
+async def get_perfil(
+    current_user: Usuario = Depends(get_current_user),
+):
+    """Retorna el perfil extendido del usuario autenticado."""
+    return {
+        "id_usuario":       current_user.id_usuario,
+        "username":         current_user.username,
+        "nombre_completo":  current_user.nombre_completo,
+        "rol":              current_user.rol,
+        "zona_habitual":    current_user.zona_habitual,
+        "tipo_pescador":    current_user.tipo_pescador,
+        "anos_experiencia": current_user.anos_experiencia,
+        "licencia_pesca":   current_user.licencia_pesca,
+        "telefono":         current_user.telefono,
+    }
+
+@router.patch("/perfil")
+async def actualizar_perfil(
+    req: PerfilUpdate,
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Actualiza los datos extendidos del perfil del usuario."""
+    for field, value in req.model_dump(exclude_none=True).items():
+        setattr(current_user, field, value)
+    await db.commit()
+    return {"mensaje": "Perfil actualizado correctamente"}
+
+
+# --- RANKINGS ---
+@router.get("/rankings")
+async def get_rankings(db: AsyncSession = Depends(get_db)):
+    """Top pescadores por captura real total, rutas y km navegados."""
+    result = await db.execute(
+        select(HistorialRuta, Usuario)
+        .join(Embarcacion, HistorialRuta.id_embarcacion == Embarcacion.id_embarcacion, isouter=True)
+        .join(Usuario, Embarcacion.owner_id == Usuario.id_usuario, isouter=True)
+        .where(HistorialRuta.captura_real_tm.isnot(None))
+    )
+    rows = result.all()
+
+    stats: dict = {}
+    for ruta, usuario in rows:
+        uid = usuario.id_usuario if usuario else 0
+        nombre = usuario.nombre_completo if usuario else "Anónimo"
+        if uid not in stats:
+            stats[uid] = {
+                "id_usuario":      uid,
+                "nombre":          nombre,
+                "total_capturas":  0.0,
+                "total_rutas":     0,
+                "total_km":        0.0,
+                "mejor_captura":   0.0,
+            }
+        stats[uid]["total_capturas"] += ruta.captura_real_tm or 0
+        stats[uid]["total_rutas"]    += 1
+        stats[uid]["total_km"]       += ruta.distancia_total_km or 0
+        if (ruta.captura_real_tm or 0) > stats[uid]["mejor_captura"]:
+            stats[uid]["mejor_captura"] = ruta.captura_real_tm or 0
+
+    ranking = sorted(stats.values(), key=lambda x: x["total_capturas"], reverse=True)[:10]
+    for i, r in enumerate(ranking):
+        r["posicion"] = i + 1
+        r["total_capturas"] = round(r["total_capturas"], 2)
+        r["total_km"]       = round(r["total_km"], 1)
+
+    return {"ranking": ranking}
+
+
+# --- CHAT / MENSAJES COMUNIDAD ---
+class MensajeCreate(BaseModel):
+    texto: str
+    tipo:  str = "GENERAL"   # GENERAL | ALERTA | PREGUNTA | OFERTA
+
+@router.get("/mensajes")
+async def get_mensajes(db: AsyncSession = Depends(get_db)):
+    """Últimos 50 mensajes del chat comunitario."""
+    result = await db.execute(
+        select(MensajeComunidad).order_by(MensajeComunidad.fecha.desc()).limit(50)
+    )
+    items = result.scalars().all()
+    return [
+        {
+            "id":     m.id,
+            "texto":  m.texto,
+            "tipo":   m.tipo,
+            "autor":  m.autor,
+            "fecha":  m.fecha.isoformat() if m.fecha else None,
+        }
+        for m in reversed(items)
+    ]
+
+@router.post("/mensajes")
+async def crear_mensaje(
+    req: MensajeCreate,
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Publica un mensaje en el chat comunitario."""
+    nuevo = MensajeComunidad(
+        texto      = req.texto.strip()[:500],
+        tipo       = req.tipo,
+        autor      = current_user.nombre_completo or current_user.username,
+        id_usuario = current_user.id_usuario,
+    )
+    db.add(nuevo)
+    await db.commit()
+    await db.refresh(nuevo)
+    return {
+        "id":    nuevo.id,
+        "texto": nuevo.texto,
+        "tipo":  nuevo.tipo,
+        "autor": nuevo.autor,
+        "fecha": nuevo.fecha.isoformat() if nuevo.fecha else None,
+    }
