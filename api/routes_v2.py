@@ -35,6 +35,7 @@ class RutaRequest(BaseModel):
     anio_fabricacion: Optional[int]   = None
     tripulacion:      Optional[int]   = None
     top_zonas:        int = 5
+    id_embarcacion:   Optional[str]   = None   # saved to history when provided
 
 
 # --- ENDPOINTS ---
@@ -166,7 +167,7 @@ async def post_ruta_optima(req: RutaRequest, db: AsyncSession = Depends(get_db))
         # 10. Guardar en historial si hubo zonas visitadas
         if resultado.get("zonas_visitadas", 0) > 0:
             nueva_ruta = HistorialRuta(
-                id_embarcacion     = None,
+                id_embarcacion     = req.id_embarcacion,
                 distancia_total_km = resultado["distancia_total_km"],
                 combustible_usado  = resultado["combustible_usado_l"],
                 carga_estimada_tm  = resultado["carga_estimada_tm"],
@@ -265,15 +266,15 @@ async def registro(req: RegistroRequest, db: AsyncSession = Depends(get_db)):
 # --- HISTORIAL ---
 @router.get("/historial")
 async def get_historial(
+    id_embarcacion: Optional[str] = Query(None),
     current_user: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Retorna el historial de rutas — todas las rutas calculadas."""
-    result = await db.execute(
-        select(HistorialRuta)
-        .order_by(HistorialRuta.fecha_calculo.desc())
-        .limit(50)
-    )
+    """Retorna el historial de rutas. Acepta ?id_embarcacion=X para filtrar."""
+    query = select(HistorialRuta).order_by(HistorialRuta.fecha_calculo.desc())
+    if id_embarcacion:
+        query = query.where(HistorialRuta.id_embarcacion == id_embarcacion)
+    result = await db.execute(query.limit(50))
     rutas = result.scalars().all()
     return {
         "usuario": current_user.nombre_completo,
@@ -409,6 +410,65 @@ async def crear_embarcacion(
     await db.commit()
     await db.refresh(barco)
     return {"id_embarcacion": barco.id_embarcacion, "nombre": barco.nombre}
+
+class EmbarcacionUpdate(BaseModel):
+    nombre:             Optional[str]   = None
+    capacidad_bodega:   Optional[float] = None
+    velocidad_promedio: Optional[float] = None
+    consumo_hora:       Optional[float] = None
+    autonomia_horas:    Optional[float] = None
+    tipo_motor:         Optional[str]   = None
+    material_casco:     Optional[str]   = None
+    tripulacion_max:    Optional[int]   = None
+    anio_fabricacion:   Optional[int]   = None
+
+@router.patch("/embarcaciones/{id_embarcacion}")
+async def actualizar_embarcacion(
+    id_embarcacion: str,
+    req: EmbarcacionUpdate,
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Updates editable fields of a vessel. Only the owner can update."""
+    result = await db.execute(
+        select(Embarcacion).where(
+            Embarcacion.id_embarcacion == id_embarcacion,
+            Embarcacion.owner_id == current_user.id_usuario
+        )
+    )
+    barco = result.scalar_one_or_none()
+    if not barco:
+        raise HTTPException(status_code=404, detail="Embarcación no encontrada")
+
+    for field, value in req.model_dump(exclude_none=True).items():
+        setattr(barco, field, value)
+
+    await db.commit()
+    await db.refresh(barco)
+    return {"mensaje": "Embarcación actualizada", "id_embarcacion": barco.id_embarcacion}
+
+
+@router.delete("/embarcaciones/{id_embarcacion}")
+async def eliminar_embarcacion(
+    id_embarcacion: str,
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Deletes a vessel. Only the owner can delete it."""
+    result = await db.execute(
+        select(Embarcacion).where(
+            Embarcacion.id_embarcacion == id_embarcacion,
+            Embarcacion.owner_id == current_user.id_usuario
+        )
+    )
+    barco = result.scalar_one_or_none()
+    if not barco:
+        raise HTTPException(status_code=404, detail="Embarcación no encontrada")
+
+    await db.delete(barco)
+    await db.commit()
+    return {"mensaje": "Embarcación eliminada", "id_embarcacion": id_embarcacion}
+
 
 @router.get("/zonas-calor")
 async def get_zonas_calor(
