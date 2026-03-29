@@ -1,10 +1,11 @@
+import os
 from passlib.context import CryptContext
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
 from typing import Optional
 
 # --- CONFIGURACIÓN DE SEGURIDAD ---
-SECRET_KEY = "ringensoft_secret_key_super_segura" # En prod esto va en variables de entorno
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-in-production-min-32-chars")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 # 24 horas de sesión
 
