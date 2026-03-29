@@ -1,27 +1,30 @@
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, declarative_base
+from dotenv import load_dotenv
+import os
 
-# --- CONFIGURACIÓN DE CONEXIÓN ---
-# Formato: mysql+pymysql://usuario:password@host:puerto/nombre_db
-# AJUSTA ESTO CON TUS DATOS REALES DE MYSQL
-SQLALCHEMY_DATABASE_URL = "mysql+pymysql://root:root@localhost:3306/ringensoft_db"
+load_dotenv()
 
-# Crear el motor de conexión
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://postgres:root@localhost:5432/fishroute_db"
 )
 
-# Crear la sesión local para las consultas
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+engine = create_async_engine(DATABASE_URL, echo=False)
 
-# Base para los modelos ORM
+AsyncSessionLocal = sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False,
+)
+
 Base = declarative_base()
 
-# Dependencia para obtener la DB en cada petición
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+async def get_db():
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
