@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from backend.database import get_db
 from backend import auth
-from backend.models import Usuario, Embarcacion, HistorialRuta
+from backend.models import Usuario, Embarcacion, HistorialRuta, Avistamiento, PlanViaje
 from backend.services.weather_service import obtener_condiciones_mar
 from backend.services.ocean_service import obtener_datos_zona
 from backend.services.fish_grid import (
@@ -561,6 +561,31 @@ async def get_estadisticas(db: AsyncSession = Depends(get_db)):
     }
 
 
+class EstadoUpdate(BaseModel):
+    estado: str
+
+@router.patch("/embarcaciones/{id_embarcacion}/estado")
+async def cambiar_estado_embarcacion(
+    id_embarcacion: str,
+    req: EstadoUpdate,
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Updates vessel status (EN_PUERTO / EN_MAR / MANTENIMIENTO)."""
+    result = await db.execute(
+        select(Embarcacion).where(
+            Embarcacion.id_embarcacion == id_embarcacion,
+            Embarcacion.owner_id == current_user.id_usuario
+        )
+    )
+    barco = result.scalar_one_or_none()
+    if not barco:
+        raise HTTPException(status_code=404, detail="Embarcación no encontrada")
+    barco.estado = req.estado
+    await db.commit()
+    return {"id_embarcacion": barco.id_embarcacion, "estado": barco.estado}
+
+
 @router.patch("/historial/{id_ruta}/captura")
 async def reportar_captura_ruta(
     id_ruta: int,
@@ -577,3 +602,180 @@ async def reportar_captura_ruta(
     ruta.captura_real_tm = captura_tm
     await db.commit()
     return {"mensaje": "Captura registrada", "id_ruta": id_ruta, "captura_tm": captura_tm}
+
+
+# --- AVISTAMIENTOS ---
+class AvistamientoCreate(BaseModel):
+    especie:     str
+    zona:        str
+    descripcion: str
+
+@router.get("/avistamientos")
+async def get_avistamientos(db: AsyncSession = Depends(get_db)):
+    """Lista los últimos 50 avistamientos reportados por la comunidad."""
+    result = await db.execute(
+        select(Avistamiento).order_by(Avistamiento.fecha.desc()).limit(50)
+    )
+    items = result.scalars().all()
+    return [
+        {
+            "id":          a.id,
+            "especie":     a.especie,
+            "zona":        a.zona,
+            "descripcion": a.descripcion,
+            "fecha":       a.fecha.isoformat() if a.fecha else None,
+            "votos":       a.votos,
+        }
+        for a in items
+    ]
+
+@router.post("/avistamientos")
+async def crear_avistamiento(
+    req: AvistamientoCreate,
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Publica un nuevo avistamiento de cardumen."""
+    nuevo = Avistamiento(
+        especie     = req.especie,
+        zona        = req.zona,
+        descripcion = req.descripcion,
+        id_usuario  = current_user.id_usuario,
+    )
+    db.add(nuevo)
+    await db.commit()
+    await db.refresh(nuevo)
+    return {
+        "id":          nuevo.id,
+        "especie":     nuevo.especie,
+        "zona":        nuevo.zona,
+        "descripcion": nuevo.descripcion,
+        "fecha":       nuevo.fecha.isoformat() if nuevo.fecha else None,
+        "votos":       nuevo.votos,
+    }
+
+@router.patch("/avistamientos/{id_avistamiento}/votar")
+async def votar_avistamiento(
+    id_avistamiento: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Incrementa el contador de votos de un avistamiento."""
+    result = await db.execute(
+        select(Avistamiento).where(Avistamiento.id == id_avistamiento)
+    )
+    item = result.scalar_one_or_none()
+    if not item:
+        raise HTTPException(status_code=404, detail="Avistamiento no encontrado")
+    item.votos += 1
+    await db.commit()
+    return {"id": item.id, "votos": item.votos}
+
+
+# --- PLANES DE VIAJE ---
+class PlanCreate(BaseModel):
+    nombre_viaje:    str
+    puerto_id:       str
+    especie:         str
+    fecha_salida:    str
+    hora_salida:     str = "06:00"
+    id_embarcacion:  Optional[str] = None
+    combustible_pct: float = 0.9
+    notas:           Optional[str] = None
+    condiciones_json: Optional[str] = None
+
+class PlanEstadoUpdate(BaseModel):
+    estado: str
+
+def _plan_to_dict(p: PlanViaje) -> dict:
+    return {
+        "id":             p.id,
+        "nombre_viaje":   p.nombre_viaje,
+        "puerto_id":      p.puerto_id,
+        "especie":        p.especie,
+        "fecha_salida":   p.fecha_salida,
+        "hora_salida":    p.hora_salida,
+        "id_embarcacion": p.id_embarcacion,
+        "combustible_pct": p.combustible_pct,
+        "notas":          p.notas,
+        "estado":         p.estado,
+        "condiciones_json": p.condiciones_json,
+        "fecha_creado":   p.fecha_creado.isoformat() if p.fecha_creado else None,
+    }
+
+@router.get("/planes")
+async def get_planes(
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Lista los planes de viaje del usuario autenticado."""
+    result = await db.execute(
+        select(PlanViaje)
+        .where(PlanViaje.id_usuario == current_user.id_usuario)
+        .order_by(PlanViaje.fecha_creado.desc())
+    )
+    return [_plan_to_dict(p) for p in result.scalars().all()]
+
+@router.post("/planes")
+async def crear_plan(
+    req: PlanCreate,
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Crea un nuevo plan de viaje."""
+    nuevo = PlanViaje(
+        nombre_viaje     = req.nombre_viaje,
+        puerto_id        = req.puerto_id,
+        especie          = req.especie,
+        fecha_salida     = req.fecha_salida,
+        hora_salida      = req.hora_salida,
+        id_embarcacion   = req.id_embarcacion,
+        combustible_pct  = req.combustible_pct,
+        notas            = req.notas,
+        condiciones_json = req.condiciones_json,
+        id_usuario       = current_user.id_usuario,
+    )
+    db.add(nuevo)
+    await db.commit()
+    await db.refresh(nuevo)
+    return _plan_to_dict(nuevo)
+
+@router.patch("/planes/{id_plan}/estado")
+async def actualizar_estado_plan(
+    id_plan: int,
+    req: PlanEstadoUpdate,
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Actualiza el estado de un plan (PLANIFICADO / COMPLETADO / CANCELADO)."""
+    result = await db.execute(
+        select(PlanViaje).where(
+            PlanViaje.id == id_plan,
+            PlanViaje.id_usuario == current_user.id_usuario
+        )
+    )
+    plan = result.scalar_one_or_none()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan no encontrado")
+    plan.estado = req.estado
+    await db.commit()
+    return {"id": plan.id, "estado": plan.estado}
+
+@router.delete("/planes/{id_plan}")
+async def eliminar_plan(
+    id_plan: int,
+    current_user: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Elimina un plan de viaje."""
+    result = await db.execute(
+        select(PlanViaje).where(
+            PlanViaje.id == id_plan,
+            PlanViaje.id_usuario == current_user.id_usuario
+        )
+    )
+    plan = result.scalar_one_or_none()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan no encontrado")
+    await db.delete(plan)
+    await db.commit()
+    return {"mensaje": "Plan eliminado", "id": id_plan}

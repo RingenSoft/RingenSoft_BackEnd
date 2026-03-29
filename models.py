@@ -62,3 +62,33 @@ class HistorialRuta(Base):
     especie_objetivo   = Column(String(50), nullable=True)
 
     embarcacion = relationship("Embarcacion")
+
+
+# 5. AVISTAMIENTOS
+class Avistamiento(Base):
+    __tablename__ = "avistamientos"
+    id          = Column(Integer, primary_key=True, index=True)
+    especie     = Column(String(50), nullable=False)
+    zona        = Column(String(100), nullable=False)
+    descripcion = Column(String(500), nullable=False)
+    fecha       = Column(DateTime(timezone=True), server_default=func.now())
+    votos       = Column(Integer, default=0)
+    id_usuario  = Column(Integer, ForeignKey("usuarios.id_usuario"), nullable=True)
+
+
+# 6. PLANES DE VIAJE
+class PlanViaje(Base):
+    __tablename__ = "planes_viaje"
+    id               = Column(Integer, primary_key=True, index=True)
+    nombre_viaje     = Column(String(200), nullable=False)
+    puerto_id        = Column(String(20), nullable=False)
+    especie          = Column(String(50), nullable=False)
+    fecha_salida     = Column(String(20), nullable=False)
+    hora_salida      = Column(String(10), default="06:00")
+    id_embarcacion   = Column(String(50), nullable=True)
+    combustible_pct  = Column(Float, default=0.9)
+    notas            = Column(String(500), nullable=True)
+    estado           = Column(String(50), default="PLANIFICADO")
+    condiciones_json = Column(String(2000), nullable=True)
+    fecha_creado     = Column(DateTime(timezone=True), server_default=func.now())
+    id_usuario       = Column(Integer, ForeignKey("usuarios.id_usuario"), nullable=True)
