@@ -1,7 +1,7 @@
 import httpx
 import numpy as np
 from datetime import datetime, timedelta
-from backend.cache.redis_cache import cache_get, cache_set, make_key, TTL_OCEAN
+from cache.redis_cache import cache_get, cache_set, make_key, TTL_OCEAN
 ERDDAP_BASE  = "https://coastwatch.pfeg.noaa.gov/erddap/griddap"
 ERDDAP_BASE2 = "https://coastwatch.noaa.gov/erddap/griddap"
 

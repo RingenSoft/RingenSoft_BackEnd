@@ -6,7 +6,7 @@ Soporta tres modos de optimización:
   - "min_combustible": prioriza zonas más cercanas con FishScore mínimo aceptable
 """
 import numpy as np
-from backend.services.vessel_model import (
+from services.vessel_model import (
     calcular_autonomia_real,
     estimar_tiempo_tramo,
     calcular_combustible_tramo,
@@ -14,7 +14,7 @@ from backend.services.vessel_model import (
 
 # Intentar usar corrientes si están disponibles (no bloquea si falla)
 try:
-    from backend.services.currents_service import ajustar_velocidad_por_corriente
+    from services.currents_service import ajustar_velocidad_por_corriente
     _CORRIENTES_OK = True
 except ImportError:
     _CORRIENTES_OK = False
@@ -202,7 +202,7 @@ def _estimar_captura(zona: dict) -> float:
     Si el servicio ML está disponible, lo usa. Si no, usa bins fijos como fallback.
     """
     try:
-        from backend.services.ml_service import predecir_captura
+        from services.ml_service import predecir_captura
         features = {
             "fish_score":   zona.get("fish_score", 0),
             "clorofila":    zona.get("clorofila", 0.5),

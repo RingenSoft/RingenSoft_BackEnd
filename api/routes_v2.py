@@ -10,17 +10,17 @@ from slowapi.util import get_remote_address
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from backend.database import get_db
+from database import get_db
 from backend import auth
-from backend.models import Usuario, Embarcacion, HistorialRuta, Avistamiento, PlanViaje, Mantenimiento, MensajeComunidad
-from backend.services.weather_service import obtener_condiciones_mar
-from backend.services.ocean_service import obtener_datos_zona
-from backend.services.fish_grid import (
+from models import Usuario, Embarcacion, HistorialRuta, Avistamiento, PlanViaje, Mantenimiento, MensajeComunidad
+from services.weather_service import obtener_condiciones_mar
+from services.ocean_service import obtener_datos_zona
+from services.fish_grid import (
     generar_grilla, filtrar_por_radio,
     calcular_radio_km, get_puerto, PUERTOS_PERU
 )
-from backend.services.fish_score import calcular_scores_zona, seleccionar_mejores_zonas
-from backend.services.route_optimizer import optimizar_ruta
+from services.fish_score import calcular_scores_zona, seleccionar_mejores_zonas
+from services.route_optimizer import optimizar_ruta
 
 router = APIRouter(prefix="/api/v2", tags=["v2"])
 limiter = Limiter(key_func=get_remote_address)
@@ -82,7 +82,7 @@ async def get_pronostico(
     lon: float = Query(..., example=-78.59),
 ):
     """Pronóstico horario de olas y viento para las próximas 48h + mejor ventana para salir."""
-    from backend.services.weather_service import obtener_pronostico_48h
+    from services.weather_service import obtener_pronostico_48h
     try:
         return await obtener_pronostico_48h(lat, lon)
     except Exception as e:
@@ -263,7 +263,7 @@ async def post_rutas_comparadas(request: Request, req: RutaRequest, db: AsyncSes
         # Intentar obtener corrientes para las zonas (sin bloquear si falla)
         corrientes = {}
         try:
-            from backend.services.currents_service import obtener_corriente
+            from services.currents_service import obtener_corriente
             tasks = {(z["lat"], z["lon"]): obtener_corriente(z["lat"], z["lon"]) for z in mejores}
             import asyncio as _asyncio
             resultados_cor = await _asyncio.gather(*tasks.values(), return_exceptions=True)
@@ -307,7 +307,7 @@ async def post_rutas_comparadas(request: Request, req: RutaRequest, db: AsyncSes
 async def ml_entrenar(db: AsyncSession = Depends(get_db)):
     """Entrena o re-entrena el modelo ML con los datos históricos disponibles."""
     try:
-        from backend.services.ml_service import entrenar_modelo
+        from services.ml_service import entrenar_modelo
         resultado = await entrenar_modelo(db)
         return resultado
     except Exception as e:
@@ -318,7 +318,7 @@ async def ml_entrenar(db: AsyncSession = Depends(get_db)):
 async def ml_estado():
     """Retorna el estado actual del modelo ML (samples, R², fecha de entrenamiento)."""
     try:
-        from backend.services.ml_service import estado_modelo
+        from services.ml_service import estado_modelo
         return estado_modelo()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -644,8 +644,8 @@ async def get_zonas_calor(
     especie: str = "ANCHOVETA"
 ):
     """Retorna FishScores de todas las zonas alcanzables para el mapa de calor."""
-    from backend.services.fish_grid import generar_grilla, filtrar_por_radio, get_puerto
-    from backend.services.fish_score import calcular_scores_zona
+    from services.fish_grid import generar_grilla, filtrar_por_radio, get_puerto
+    from services.fish_score import calcular_scores_zona
 
     puerto = get_puerto(puerto_id)
     if not puerto:

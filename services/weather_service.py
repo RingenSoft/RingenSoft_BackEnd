@@ -6,7 +6,7 @@ MARINE_URL = "https://marine-api.open-meteo.com/v1/marine"
 WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
 
 async def obtener_condiciones_mar(lat: float, lon: float) -> dict:
-    from backend.cache.redis_cache import cache_get, cache_set, make_key, TTL_CLIMA
+    from cache.redis_cache import cache_get, cache_set, make_key, TTL_CLIMA
 
     key = make_key("clima", lat, lon)
     cached = cache_get(key)
@@ -67,7 +67,7 @@ async def obtener_pronostico_48h(lat: float, lon: float) -> dict:
     Pronóstico horario de olas y viento para las próximas 48 horas.
     Incluye recomendación de mejor ventana para salir al mar.
     """
-    from backend.cache.redis_cache import cache_get, cache_set, make_key
+    from cache.redis_cache import cache_get, cache_set, make_key
     TTL_PRONOSTICO = 3600  # 1 hora
 
     key = make_key("pronostico48h", lat, lon)

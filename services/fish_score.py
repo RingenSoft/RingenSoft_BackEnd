@@ -1,12 +1,12 @@
 import asyncio
 import numpy as np
-from backend.services.ocean_service import (
+from services.ocean_service import (
     obtener_temperatura_mar,
     obtener_clorofila,
     calcular_score_temperatura,
     calcular_score_clorofila,
 )
-from backend.services.weather_service import obtener_condiciones_mar
+from services.weather_service import obtener_condiciones_mar
 
 # Cuántos puntos consultar en paralelo (no saturar las APIs)
 BATCH_SIZE = 8

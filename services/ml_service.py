@@ -6,7 +6,7 @@ Predice captura_real_tm a partir de features oceanográficas y operacionales.
 Se entrena con datos históricos de HistorialRuta donde captura_real_tm no es NULL.
 
 Uso:
-    from backend.services.ml_service import predecir_captura, entrenar_modelo, estado_modelo
+    from services.ml_service import predecir_captura, entrenar_modelo, estado_modelo
 """
 import os
 import math
@@ -93,7 +93,7 @@ async def entrenar_modelo(db) -> dict:
     Retorna métricas del entrenamiento.
     """
     from sqlalchemy import select, text
-    from backend.models import HistorialRuta, Embarcacion
+    from models import HistorialRuta, Embarcacion
 
     # Obtener datos de entrenamiento
     result = await db.execute(
