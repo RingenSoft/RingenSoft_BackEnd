@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-from .database import Base
+from database import Base
 
 # 1. PUERTOS
 class Puerto(Base):
