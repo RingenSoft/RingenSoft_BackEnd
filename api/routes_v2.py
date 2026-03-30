@@ -11,7 +11,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from database import get_db
-from backend import auth
+import auth
 from models import Usuario, Embarcacion, HistorialRuta, Avistamiento, PlanViaje, Mantenimiento, MensajeComunidad
 from services.weather_service import obtener_condiciones_mar
 from services.ocean_service import obtener_datos_zona
