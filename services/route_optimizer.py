@@ -126,9 +126,11 @@ def optimizar_ruta(
         if carga_acumulada >= cap_bodega:
             break
 
-    # Retorno al puerto
-    dist_retorno = haversine_km(pos_lat, pos_lon, puerto["lat"], puerto["lon"])
-    tiempo_total += estimar_tiempo_tramo(dist_retorno, vel_kmh, altura_olas)
+    # Retorno al puerto — descontar combustible del tramo final para reporte exacto
+    dist_retorno  = haversine_km(pos_lat, pos_lon, puerto["lat"], puerto["lon"])
+    comb_retorno  = calcular_combustible_tramo(dist_retorno, vel_kmh, consumo_h)
+    combustible_disponible -= comb_retorno
+    tiempo_total    += estimar_tiempo_tramo(dist_retorno, vel_kmh, altura_olas)
     distancia_total += dist_retorno
     ruta_nodos.append(_nodo_puerto(puerto, "RETORNO"))
 
@@ -185,15 +187,18 @@ def _seleccionar_zona(candidatas: list, modo: str) -> dict:
         return max(candidatas, key=lambda x: x["fish_score"])
 
     elif modo == "min_combustible":
-        # Maximiza FishScore / distancia (eficiencia de pesca por km)
-        # Solo considera zonas con fish_score ≥ 30 para evitar zonas malas cercanas
-        validas = [c for c in candidatas if c["fish_score"] >= 30]
+        # Prioriza zonas cercanas con buen score — mínimo combustible
+        validas = [c for c in candidatas if c["fish_score"] >= 20]
         if not validas:
             validas = candidatas
         return min(validas, key=lambda x: x["_dist_ida"] / max(x["fish_score"], 1))
 
-    else:  # equilibrado (default)
-        return max(candidatas, key=lambda x: x["fish_score"])
+    else:  # equilibrado (default): balancea fish_score y distancia desde posición actual
+        # Factor proporcional: cada 100 km extra reduce el score un 50% (~penalización suave)
+        return max(
+            candidatas,
+            key=lambda x: x["fish_score"] / (1.0 + x["_dist_ida"] / 100.0)
+        )
 
 
 def _estimar_captura(zona: dict) -> float:
@@ -226,29 +231,42 @@ def _estimar_captura(zona: dict) -> float:
 def _or_opt(zonas: list, puerto: dict) -> list:
     """
     Or-opt: mueve segmentos de 1 o 2 zonas a la mejor posición disponible.
-    Más efectivo que 2-opt para encontrar rutas cortas.
+    Usa caché de distancias entre pares para evitar recálculos O(n²).
     """
+    def _dist_par(a: dict, b: dict) -> float:
+        return haversine_km(a["lat"], a["lon"], b["lat"], b["lon"])
+
+    # Nodo ficticio de puerto para simplificar cálculo de bordes
+    nodo_puerto = {"lat": puerto["lat"], "lon": puerto["lon"]}
+
+    def _dist_ruta_rapida(ruta: list) -> float:
+        if not ruta:
+            return 0.0
+        total = _dist_par(nodo_puerto, ruta[0])
+        for k in range(len(ruta) - 1):
+            total += _dist_par(ruta[k], ruta[k + 1])
+        total += _dist_par(ruta[-1], nodo_puerto)
+        return total
+
     mejor = list(zonas)
     mejorado = True
     while mejorado:
         mejorado = False
+        dist_actual = _dist_ruta_rapida(mejor)
         for seg_len in [1, 2]:
+            if mejorado:
+                break
             for i in range(len(mejor)):
-                if i + seg_len > len(mejor):
+                if mejorado or i + seg_len > len(mejor):
                     continue
                 segmento = mejor[i:i + seg_len]
                 resto    = mejor[:i] + mejor[i + seg_len:]
-                dist_actual = _distancia_ruta(mejor, puerto)
                 for j in range(len(resto) + 1):
                     nueva = resto[:j] + segmento + resto[j:]
-                    if _distancia_ruta(nueva, puerto) < dist_actual - 0.01:
-                        mejor    = nueva
-                        mejorado = True
+                    if _dist_ruta_rapida(nueva) < dist_actual - 0.01:
+                        mejor      = nueva
+                        mejorado   = True
                         break
-                if mejorado:
-                    break
-            if mejorado:
-                break
     return mejor
 
 

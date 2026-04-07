@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 import numpy as np
 from datetime import datetime, timedelta
@@ -41,7 +42,7 @@ async def obtener_temperatura_mar(lat: float, lon: float) -> dict:
     )
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(timeout=12.0) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             data = resp.json()
@@ -74,41 +75,49 @@ async def obtener_clorofila(lat: float, lon: float) -> dict:
     lat1, lat2 = lat - delta, lat + delta
     lon1, lon2 = lon - delta, lon + delta
 
-    async with httpx.AsyncClient(timeout=25.0) as client:
-        for dias_atras in [5, 13, 21, 29, 37]:
-            fecha = (datetime.utcnow() - timedelta(days=dias_atras)).strftime("%Y-%m-%dT00:00:00Z")
-            url = (
-                f"{ERDDAP_BASE}/erdMBchla8day_LonPM180.json"
-                f"?chlorophyll[({fecha})][(0)]"
-                f"[({lat1:.2f}):1:({lat2:.2f})]"
-                f"[({lon1:.2f}):1:({lon2:.2f})]"
-            )
-            try:
-                resp = await client.get(url)
-                if resp.status_code != 200:
-                    continue
-                data = resp.json()
-                valores = [
-                    row[4] for row in data["table"]["rows"]
-                    if row[4] is not None and row[4] > 0
-                ]
-                if not valores:
-                    continue
+    async def _fetch_fecha(client: httpx.AsyncClient, dias_atras: int):
+        fecha = (datetime.utcnow() - timedelta(days=dias_atras)).strftime("%Y-%m-%dT00:00:00Z")
+        url = (
+            f"{ERDDAP_BASE}/erdMBchla8day_LonPM180.json"
+            f"?chlorophyll[({fecha})][(0)]"
+            f"[({lat1:.2f}):1:({lat2:.2f})]"
+            f"[({lon1:.2f}):1:({lon2:.2f})]"
+        )
+        try:
+            resp = await client.get(url, timeout=12.0)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            valores = [
+                row[4] for row in data["table"]["rows"]
+                if row[4] is not None and row[4] > 0
+            ]
+            return (valores, fecha[:10]) if valores else None
+        except Exception:
+            return None
 
-                chla = round(float(np.mean(valores)), 3)
-                nivel, descripcion = _clasificar_clorofila(chla)
-                resultado = {
-                    "clorofila_mg_m3": chla,
-                    "nivel": nivel,
-                    "descripcion": descripcion,
-                    "fuente": "MODIS Aqua / ERDDAP NOAA",
-                    "disponible": True,
-                    "fecha_dato": fecha[:10],
-                }
-                cache_set(key, resultado, TTL_OCEAN)
-                return resultado
-            except Exception:
-                continue
+    # Consultar todas las fechas EN PARALELO — de 125s secuencial a ~12s paralelo
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        resultados = await asyncio.gather(
+            *[_fetch_fecha(client, d) for d in [5, 13, 21, 29, 37]]
+        )
+
+    # Tomar el primer resultado válido (prioridad: más reciente primero)
+    for res in resultados:
+        if res is not None:
+            valores, fecha_dato = res
+            chla = round(float(np.mean(valores)), 3)
+            nivel, descripcion = _clasificar_clorofila(chla)
+            resultado = {
+                "clorofila_mg_m3": chla,
+                "nivel": nivel,
+                "descripcion": descripcion,
+                "fuente": "MODIS Aqua / ERDDAP NOAA",
+                "disponible": True,
+                "fecha_dato": fecha_dato,
+            }
+            cache_set(key, resultado, TTL_OCEAN)
+            return resultado
 
     return {
         "clorofila_mg_m3": None,
@@ -148,12 +157,19 @@ def calcular_score_temperatura(temp_c: float, especie: str) -> float:
 def calcular_score_clorofila(chla: float) -> float:
     """
     Retorna 0-100 según concentración de clorofila-a.
-    Escala logarítmica: diferencia entre 0.1 y 1.0 es más importante que entre 5 y 6.
+    Escala logarítmica ajustada para la Corriente de Humboldt:
+      0.1 mg/m³ →  ~9   (oligotrófico)
+      0.5 mg/m³ →  ~24  (bajo)
+      1.0 mg/m³ →  ~33  (moderado)
+      5.0 mg/m³ →  ~56  (productivo)
+     10.0 mg/m³ →  ~67  (muy productivo)
+     20.0 mg/m³ →  ~77  (zona de surgencia)
+     50.0 mg/m³ →  ~91  (surgencia intensa)
     """
     if chla is None or chla <= 0:
         return 0.0
     import math
-    score = min(100.0, 25.0 * math.log10(1 + chla * 10))
+    score = min(100.0, 35.0 * math.log10(1 + chla * 8))
     return round(score, 1)
 
 
@@ -162,7 +178,6 @@ async def obtener_datos_zona(lat: float, lon: float, especie: str = "ANCHOVETA")
     Función principal: retorna todos los datos oceanográficos de un punto
     más los scores calculados para el algoritmo FishScore.
     """
-    import asyncio
     sst, chla = await asyncio.gather(
         obtener_temperatura_mar(lat, lon),
         obtener_clorofila(lat, lon),

@@ -5,15 +5,24 @@ from functools import wraps
 
 # Conexión a Redis local
 _client = None
+_redis_unavailable = False  # evita reconectar en cada llamada cuando Redis no está disponible
 
 def get_redis():
-    global _client
+    global _client, _redis_unavailable
+    if _redis_unavailable:
+        return None
     if _client is None:
         try:
-            _client = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+            _client = redis.Redis(
+                host="localhost", port=6379, db=0,
+                decode_responses=True,
+                socket_connect_timeout=1,
+                socket_timeout=2,
+            )
             _client.ping()
         except Exception:
             _client = None
+            _redis_unavailable = True  # no volver a intentar hasta restart
     return _client
 
 

@@ -8,8 +8,8 @@ from services.ocean_service import (
 )
 from services.weather_service import obtener_condiciones_mar
 
-# Cuántos puntos consultar en paralelo (no saturar las APIs)
-BATCH_SIZE = 8
+# Cuántos puntos consultar en paralelo — ERDDAP tolera 16 sin throttling
+BATCH_SIZE = 16
 
 
 async def calcular_fish_score_punto(
@@ -20,7 +20,7 @@ async def calcular_fish_score_punto(
     """
     Calcula FishScore 0-100 para un punto usando datos reales de satélite.
     Formula:
-      FishScore = Chla(35%) + SST(25%) + Clima(20%) + Distancia(10%) + Profundidad(10%)
+      FishScore = Chla(35%) + SST(25%) + Clima(20%) + Distancia(20%)
     """
     lat, lon = punto["lat"], punto["lon"]
 
@@ -95,7 +95,7 @@ async def calcular_scores_zona(
 
         # Pausa breve entre batches para no saturar ERDDAP
         if i + BATCH_SIZE < total:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
     # Ordenar por FishScore descendente
     resultados.sort(key=lambda x: x["fish_score"], reverse=True)

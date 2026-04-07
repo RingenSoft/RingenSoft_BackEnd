@@ -1,10 +1,8 @@
-
-
 import asyncio
-from fastapi import APIRouter, HTTPException, Query, Request
+from datetime import datetime
+from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from pydantic import BaseModel
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from fastapi.security import OAuth2PasswordBearer
@@ -19,7 +17,7 @@ from services.fish_grid import (
     generar_grilla, filtrar_por_radio,
     calcular_radio_km, get_puerto, PUERTOS_PERU
 )
-from services.fish_score import calcular_scores_zona, seleccionar_mejores_zonas
+from services.fish_score import calcular_scores_zona, seleccionar_mejores_zonas, _score_clima
 from services.route_optimizer import optimizar_ruta
 
 router = APIRouter(prefix="/api/v2", tags=["v2"])
@@ -60,9 +58,9 @@ async def get_condiciones(
             "clima": clima,
             "oceanografia": ocean,
             "fish_score_preliminar": round(
-                ocean["scores"]["clorofila"]    * 0.35 +
-                ocean["scores"]["temperatura"]  * 0.25 +
-                (100 - min(clima["mar"]["altura_olas_m"] * 20, 100)) * 0.10,
+                ocean["scores"]["clorofila"]   * 0.35 +
+                ocean["scores"]["temperatura"] * 0.25 +
+                _score_clima(clima)            * 0.20,
                 1
             )
         }
@@ -114,14 +112,34 @@ async def post_ruta_optima(request: Request, req: RutaRequest, db: AsyncSession 
             detail=f"Especie inválida. Válidas: {especies_validas}"
         )
 
-    # 3. Construir perfil de embarcación
+    # 3. Construir y validar perfil de embarcación
+    velocidad_nudos  = req.velocidad_nudos   or 10.0
+    consumo_hora     = req.consumo_hora       or 20.0
+    autonomia_horas  = req.autonomia_horas    or 24.0
+    capacidad_bodega = req.capacidad_bodega   or 15.0
+    anio_fabricacion = req.anio_fabricacion   or 2015
+
+    errores_emb = []
+    if not (1.0 <= velocidad_nudos <= 40.0):
+        errores_emb.append(f"velocidad_nudos debe estar entre 1 y 40 (recibido: {velocidad_nudos})")
+    if not (1.0 <= consumo_hora <= 500.0):
+        errores_emb.append(f"consumo_hora debe estar entre 1 y 500 L/h (recibido: {consumo_hora})")
+    if not (2.0 <= autonomia_horas <= 240.0):
+        errores_emb.append(f"autonomia_horas debe estar entre 2 y 240 h (recibido: {autonomia_horas})")
+    if not (0.5 <= capacidad_bodega <= 500.0):
+        errores_emb.append(f"capacidad_bodega debe estar entre 0.5 y 500 TM (recibido: {capacidad_bodega})")
+    if not (1950 <= anio_fabricacion <= datetime.now().year):
+        errores_emb.append(f"anio_fabricacion debe estar entre 1950 y {datetime.now().year}")
+    if errores_emb:
+        raise HTTPException(status_code=422, detail={"errores_embarcacion": errores_emb})
+
     embarcacion = {
-        "velocidad_promedio": req.velocidad_nudos   or 10.0,
-        "consumo_hora":       req.consumo_hora       or 20.0,
-        "autonomia_horas":    req.autonomia_horas    or 24.0,
-        "capacidad_bodega":   req.capacidad_bodega   or 15.0,
-        "anio_fabricacion":   req.anio_fabricacion   or 2015,
-        "tripulacion_max":    req.tripulacion        or 6,
+        "velocidad_promedio": velocidad_nudos,
+        "consumo_hora":       consumo_hora,
+        "autonomia_horas":    autonomia_horas,
+        "capacidad_bodega":   capacidad_bodega,
+        "anio_fabricacion":   anio_fabricacion,
+        "tripulacion_max":    req.tripulacion or 6,
     }
 
     combustible_pct = max(0.1, min(1.0, req.combustible_pct))
@@ -151,24 +169,27 @@ async def post_ruta_optima(request: Request, req: RutaRequest, db: AsyncSession 
         )
 
         if not puntos_alcanzables:
-            raise HTTPException(
-                status_code=400,
-                detail="No hay puntos de pesca en el radio de operación."
-            )
+            return {
+                "status": "SIN_ZONAS",
+                "mensaje": "No hay zonas de pesca alcanzables con la autonomía actual de la embarcación.",
+                "radio_km": radio_km,
+                "resultado": None,
+            }
 
-        # 7. Calcular FishScores (máximo 20 puntos para velocidad)
-        muestra = puntos_alcanzables[:20]
+        # 7. Calcular FishScores — ordenar por distancia y evaluar hasta 40 puntos
+        puntos_alcanzables.sort(key=lambda p: p.get("distancia_km", 999))
+        muestra = puntos_alcanzables[:40]
         scored = await calcular_scores_zona(
             muestra, especie, puerto["lat"], puerto["lon"]
         )
 
-        # 8. Seleccionar mejores zonas
+        # 8. Seleccionar mejores zonas (más zonas = el optimizador tiene más para elegir)
         mejores = seleccionar_mejores_zonas(
-            scored, top_n=req.top_zonas, score_minimo=20.0
+            scored, top_n=max(req.top_zonas, 10), score_minimo=20.0
         )
 
         if not mejores:
-            mejores = scored[:3]
+            mejores = scored[:5]
 
         # 9. Optimizar ruta
         altura_olas = clima["mar"]["altura_olas_m"]
@@ -254,9 +275,10 @@ async def post_rutas_comparadas(request: Request, req: RutaRequest, db: AsyncSes
         )
         grilla   = generar_grilla()
         puntos   = filtrar_por_radio(grilla, puerto["lat"], puerto["lon"], radio_km)
-        muestra  = puntos[:20]
+        puntos.sort(key=lambda p: p.get("distancia_km", 999))
+        muestra  = puntos[:40]
         scored   = await calcular_scores_zona(muestra, especie, puerto["lat"], puerto["lon"])
-        mejores  = seleccionar_mejores_zonas(scored, top_n=req.top_zonas, score_minimo=20.0) or scored[:3]
+        mejores  = seleccionar_mejores_zonas(scored, top_n=max(req.top_zonas, 10), score_minimo=10.0) or scored[:5]
 
         altura_olas = clima["mar"]["altura_olas_m"]
 
@@ -368,6 +390,7 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
         "nombre":        user.nombre_completo,
         "rol":           user.rol,
         "id_usuario":    user.id_usuario,
+        "zona_habitual": user.zona_habitual,
     }
 
 
@@ -549,6 +572,7 @@ async def get_embarcaciones(
             "tripulacion_max":   b.tripulacion_max,
             "anio_fabricacion":  b.anio_fabricacion,
             "estado":            b.estado,
+            "puerto_base_id":    b.puerto_base_id,
         }
         for b in barcos
     ]
@@ -651,26 +675,35 @@ async def get_zonas_calor(
     if not puerto:
         raise HTTPException(status_code=404, detail="Puerto no encontrado")
 
-    grilla = generar_grilla()
-    puntos = filtrar_por_radio(grilla, puerto["lat"], puerto["lon"], 300)
-    muestra = puntos[:15]
+    try:
+        grilla = generar_grilla()
+        puntos = filtrar_por_radio(grilla, puerto["lat"], puerto["lon"], 300)
+        muestra = puntos[:15]
 
-    scored = await calcular_scores_zona(muestra, especie, puerto["lat"], puerto["lon"])
-    return {
-        "puerto": puerto,
-        "especie": especie,
-        "zonas": [
-            {
-                "lat":        z["lat"],
-                "lon":        z["lon"],
-                "fish_score": z["fish_score"],
-                "clorofila":  z.get("clorofila"),
-                "temperatura": z.get("temperatura_c"),
-                "nivel_chla": z.get("nivel_chla", ""),
-            }
-            for z in scored
-        ]
-    }
+        scored = await calcular_scores_zona(muestra, especie, puerto["lat"], puerto["lon"])
+        return {
+            "puerto": puerto,
+            "especie": especie,
+            "zonas": [
+                {
+                    "lat":        z["lat"],
+                    "lon":        z["lon"],
+                    "fish_score": z["fish_score"],
+                    "clorofila":  z.get("clorofila"),
+                    "temperatura": z.get("temperatura_c"),
+                    "nivel_chla": z.get("nivel_chla", ""),
+                }
+                for z in scored
+            ]
+        }
+    except Exception as e:
+        # Retornar zonas vacías con advertencia en vez de HTTP 500
+        return {
+            "puerto": puerto,
+            "especie": especie,
+            "zonas": [],
+            "advertencia": f"No se pudieron calcular zonas: {str(e)[:120]}"
+        }
 @router.get("/estadisticas")
 async def get_estadisticas(db: AsyncSession = Depends(get_db)):
     """Estadísticas agregadas del historial de rutas."""
@@ -715,14 +748,16 @@ async def get_estadisticas(db: AsyncSession = Depends(get_db)):
         ],
         "ultimas_rutas": [
             {
-                "id":         r.id_ruta,
-                "especie":    r.especie_objetivo,
-                "distancia":  r.distancia_total_km,
-                "carga":      r.carga_estimada_tm,
+                "id":           r.id_ruta,
+                "especie":      r.especie_objetivo,
+                "distancia":    r.distancia_total_km,
+                "carga":        r.carga_estimada_tm,
                 "captura_real": r.captura_real_tm,
-                "fecha":      r.fecha_calculo.isoformat() if r.fecha_calculo else None,
-                "olas":       r.condicion_olas_m,
-                "temp_mar":   r.temp_mar_c,
+                "fecha":        r.fecha_calculo.isoformat() if r.fecha_calculo else None,
+                "olas":         r.condicion_olas_m,
+                "temp_mar":     r.temp_mar_c,
+                "fish_score":   r.fish_score_promedio,
+                "tiempo_horas": r.tiempo_total_horas,
             }
             for r in rutas[:20]
         ],
@@ -758,6 +793,7 @@ async def cambiar_estado_embarcacion(
 async def reportar_captura_ruta(
     id_ruta: int,
     captura_tm: float,
+    current_user: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Actualiza la captura real de una ruta existente."""

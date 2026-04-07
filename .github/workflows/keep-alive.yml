@@ -1,0 +1,17 @@
+name: Keep Backend Alive
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render backend
+        run: |
+          echo "Pinging backend at $(date)..."
+          curl -sf --max-time 60 https://ringensoft-backend.onrender.com/ \
+            && echo "Backend respondió OK" \
+            || echo "Backend estaba durmiendo — solicitud de wake-up enviada"

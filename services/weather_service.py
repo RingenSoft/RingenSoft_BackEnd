@@ -1,9 +1,27 @@
+import asyncio
 import httpx
 from datetime import datetime
 
 # Open-Meteo Marine API — sin API key, completamente gratuita
 MARINE_URL = "https://marine-api.open-meteo.com/v1/marine"
 WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
+
+
+def _condiciones_fallback(lat: float, lon: float, error: str) -> dict:
+    """Respuesta segura cuando Open-Meteo no está disponible."""
+    alerta = _calcular_alerta(0, 0)
+    return {
+        "latitud": lat, "longitud": lon,
+        "timestamp": datetime.now().isoformat(),
+        "mar": {"altura_olas_m": 0.0, "periodo_olas_s": 0.0, "direccion_olas": 0.0},
+        "viento": {"velocidad_kmh": 0.0, "rafagas_kmh": 0.0, "direccion_grados": 0.0},
+        "alerta": alerta,
+        "navegacion_segura": True,
+        "datos_disponibles": False,
+        "advertencia": f"Clima no disponible ({error}) — se asumen condiciones neutras",
+        "_from_cache": False,
+    }
+
 
 async def obtener_condiciones_mar(lat: float, lon: float) -> dict:
     from cache.redis_cache import cache_get, cache_set, make_key, TTL_CLIMA
@@ -25,21 +43,28 @@ async def obtener_condiciones_mar(lat: float, lon: float) -> dict:
         "forecast_days": 1, "timezone": "America/Lima"
     }
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp_mar, resp_viento = await __import__('asyncio').gather(
-            client.get(MARINE_URL, params=params_mar),
-            client.get(WEATHER_URL, params=params_viento),
-        )
-        resp_mar.raise_for_status()
-        resp_viento.raise_for_status()
-        datos_mar    = resp_mar.json()
-        datos_viento = resp_viento.json()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp_mar, resp_viento = await asyncio.gather(
+                client.get(MARINE_URL, params=params_mar),
+                client.get(WEATHER_URL, params=params_viento),
+            )
+            resp_mar.raise_for_status()
+            resp_viento.raise_for_status()
+            datos_mar    = resp_mar.json()
+            datos_viento = resp_viento.json()
+    except httpx.HTTPStatusError as e:
+        return _condiciones_fallback(lat, lon, f"HTTP {e.response.status_code}")
+    except (httpx.TimeoutException, httpx.ConnectError) as e:
+        return _condiciones_fallback(lat, lon, "timeout/conexión")
+    except Exception as e:
+        return _condiciones_fallback(lat, lon, str(e)[:60])
 
     current_mar    = datos_mar.get("current", {})
     current_viento = datos_viento.get("current", {})
-    altura_olas    = current_mar.get("wave_height", 0)
-    vel_viento     = current_viento.get("wind_speed_10m", 0)
-    rafagas        = current_viento.get("wind_gusts_10m", 0)
+    altura_olas    = current_mar.get("wave_height") or 0
+    vel_viento     = current_viento.get("wind_speed_10m") or 0
+    rafagas        = current_viento.get("wind_gusts_10m") or 0
     alerta         = _calcular_alerta(altura_olas, vel_viento)
 
     resultado = {
@@ -47,16 +72,17 @@ async def obtener_condiciones_mar(lat: float, lon: float) -> dict:
         "timestamp": datetime.now().isoformat(),
         "mar": {
             "altura_olas_m":  round(altura_olas, 2),
-            "periodo_olas_s": round(current_mar.get("wave_period", 0), 1),
-            "direccion_olas": round(current_mar.get("wave_direction", 0), 0),
+            "periodo_olas_s": round(current_mar.get("wave_period") or 0, 1),
+            "direccion_olas": round(current_mar.get("wave_direction") or 0, 0),
         },
         "viento": {
             "velocidad_kmh":    round(vel_viento, 1),
             "rafagas_kmh":      round(rafagas, 1),
-            "direccion_grados": round(current_viento.get("wind_direction_10m", 0), 0),
+            "direccion_grados": round(current_viento.get("wind_direction_10m") or 0, 0),
         },
         "alerta": alerta,
         "navegacion_segura": alerta["nivel"] in ("VERDE", "AMARILLO"),
+        "datos_disponibles": True,
         "_from_cache": False,
     }
     cache_set(key, resultado, TTL_CLIMA)
@@ -86,15 +112,24 @@ async def obtener_pronostico_48h(lat: float, lon: float) -> dict:
         "forecast_days": 2, "timezone": "America/Lima"
     }
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp_mar, resp_viento = await __import__('asyncio').gather(
-            client.get(MARINE_URL, params=params_mar),
-            client.get(WEATHER_URL, params=params_viento),
-        )
-        resp_mar.raise_for_status()
-        resp_viento.raise_for_status()
-        d_mar    = resp_mar.json().get("hourly", {})
-        d_viento = resp_viento.json().get("hourly", {})
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp_mar, resp_viento = await asyncio.gather(
+                client.get(MARINE_URL, params=params_mar),
+                client.get(WEATHER_URL, params=params_viento),
+            )
+            resp_mar.raise_for_status()
+            resp_viento.raise_for_status()
+            d_mar    = resp_mar.json().get("hourly", {})
+            d_viento = resp_viento.json().get("hourly", {})
+    except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, Exception):
+        return {
+            "lat": lat, "lon": lon,
+            "horas": [],
+            "mejor_ventana_salida": None,
+            "resumen": "Pronóstico no disponible — API Open-Meteo sin respuesta",
+            "datos_disponibles": False,
+        }
 
     tiempos  = d_mar.get("time", [])
     olas     = d_mar.get("wave_height", [])
