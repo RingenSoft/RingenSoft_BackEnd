@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import numpy as np
 from services.ocean_service import (
     obtener_temperatura_mar,
@@ -7,6 +8,8 @@ from services.ocean_service import (
     calcular_score_clorofila,
 )
 from services.weather_service import obtener_condiciones_mar
+
+logger = logging.getLogger(__name__)
 
 # Cuántos puntos consultar en paralelo — ERDDAP tolera 16 sin throttling
 BATCH_SIZE = 16
@@ -90,7 +93,8 @@ async def calcular_scores_zona(
 
         for r in batch_result:
             if isinstance(r, Exception):
-                continue  # skip puntos con error de API
+                logger.warning("Error calculando FishScore para un punto del batch: %s", r)
+                continue
             resultados.append(r)
 
         # Pausa breve entre batches para no saturar ERDDAP

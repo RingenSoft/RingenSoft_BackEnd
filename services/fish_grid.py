@@ -28,24 +28,31 @@ OFFSET_COSTA = 0.5
 # Resolución de la grilla — 0.5 grados ~ 55km entre puntos
 RESOLUCION_GRADOS = 0.5
 
-# Puertos pesqueros principales del Perú con coordenadas GPS reales
+# Puertos pesqueros del Perú con coordenadas GPS reales (norte a sur)
 PUERTOS_PERU = [
-    {"id": "TUMBES",    "nombre": "Tumbes",         "lat": -3.57,  "lon": -80.45},
-    {"id": "PAITA",     "nombre": "Paita",           "lat": -5.09,  "lon": -81.11},
-    {"id": "SECHURA",   "nombre": "Sechura",         "lat": -5.56,  "lon": -80.82},
-    {"id": "CHICAMA",   "nombre": "Puerto Chicama",  "lat": -7.70,  "lon": -79.45},
-    {"id": "SALAVERRY", "nombre": "Salaverry",       "lat": -8.22,  "lon": -78.98},
-    {"id": "CHIMBOTE",  "nombre": "Chimbote",        "lat": -9.07,  "lon": -78.59},
-    {"id": "CASMA",     "nombre": "Casma",           "lat": -9.47,  "lon": -78.32},
-    {"id": "HUARMEY",   "nombre": "Huarmey",         "lat": -10.07, "lon": -78.15},
-    {"id": "HUACHO",    "nombre": "Huacho",          "lat": -11.11, "lon": -77.61},
-    {"id": "CHANCAY",   "nombre": "Chancay",         "lat": -11.57, "lon": -77.27},
-    {"id": "CALLAO",    "nombre": "Callao",          "lat": -12.05, "lon": -77.15},
-    {"id": "PUCUSANA",  "nombre": "Pucusana",        "lat": -12.47, "lon": -76.80},
-    {"id": "PISCO",     "nombre": "Pisco",           "lat": -13.71, "lon": -76.22},
-    {"id": "ATICO",     "nombre": "Atico",           "lat": -16.23, "lon": -73.68},
-    {"id": "MATARANI",  "nombre": "Matarani",        "lat": -17.00, "lon": -72.11},
-    {"id": "ILO",       "nombre": "Ilo",             "lat": -17.64, "lon": -71.34},
+    {"id": "TUMBES",        "nombre": "Tumbes",           "lat": -3.57,  "lon": -80.45},
+    {"id": "TALARA",        "nombre": "Talara",           "lat": -4.57,  "lon": -81.27},
+    {"id": "PAITA",         "nombre": "Paita",            "lat": -5.09,  "lon": -81.11},
+    {"id": "SECHURA",       "nombre": "Sechura",          "lat": -5.56,  "lon": -80.82},
+    {"id": "CHICAMA",       "nombre": "Puerto Chicama",   "lat": -7.70,  "lon": -79.45},
+    {"id": "SALAVERRY",     "nombre": "Salaverry",        "lat": -8.22,  "lon": -78.98},
+    {"id": "CHIMBOTE",      "nombre": "Chimbote",         "lat": -9.07,  "lon": -78.59},
+    {"id": "COISHCO",       "nombre": "Coishco",          "lat": -9.01,  "lon": -78.58},
+    {"id": "CASMA",         "nombre": "Casma",            "lat": -9.47,  "lon": -78.32},
+    {"id": "HUARMEY",       "nombre": "Huarmey",          "lat": -10.07, "lon": -78.15},
+    {"id": "SUPE",          "nombre": "Supe",             "lat": -10.79, "lon": -77.78},
+    {"id": "HUACHO",        "nombre": "Huacho",           "lat": -11.11, "lon": -77.61},
+    {"id": "CHANCAY",       "nombre": "Chancay",          "lat": -11.57, "lon": -77.27},
+    {"id": "CALLAO",        "nombre": "Callao",           "lat": -12.05, "lon": -77.15},
+    {"id": "PUCUSANA",      "nombre": "Pucusana",         "lat": -12.47, "lon": -76.80},
+    {"id": "PISCO",         "nombre": "Pisco",            "lat": -13.71, "lon": -76.22},
+    {"id": "TAMBO_DE_MORA", "nombre": "Tambo de Mora",   "lat": -13.47, "lon": -76.19},
+    {"id": "ATICO",         "nombre": "Atico",            "lat": -16.23, "lon": -73.68},
+    {"id": "QUILCA",        "nombre": "Quilca",           "lat": -16.72, "lon": -72.42},
+    {"id": "CAMANÃ",        "nombre": "Camaná",           "lat": -16.62, "lon": -72.71},
+    {"id": "MOLLENDO",      "nombre": "Mollendo",         "lat": -17.02, "lon": -72.01},
+    {"id": "MATARANI",      "nombre": "Matarani",         "lat": -17.00, "lon": -72.11},
+    {"id": "ILO",           "nombre": "Ilo",              "lat": -17.64, "lon": -71.34},
 ]
 
 # Cache en memoria para no recalcular la grilla en cada request

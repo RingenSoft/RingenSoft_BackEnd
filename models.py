@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
@@ -85,6 +85,7 @@ class Avistamiento(Base):
     fecha       = Column(DateTime(timezone=True), server_default=func.now())
     votos       = Column(Integer, default=0)
     id_usuario  = Column(Integer, ForeignKey("usuarios.id_usuario"), nullable=True)
+    foto_url    = Column(String(500), nullable=True)   # ruta relativa al archivo subido
 
 
 # 6. MENSAJES COMUNIDAD
@@ -131,3 +132,37 @@ class PlanViaje(Base):
     condiciones_json = Column(String(2000), nullable=True)
     fecha_creado     = Column(DateTime(timezone=True), server_default=func.now())
     id_usuario       = Column(Integer, ForeignKey("usuarios.id_usuario"), nullable=True)
+
+
+# 8. BITÁCORA DE CAPTURAS
+class BitacoraCapturas(Base):
+    __tablename__ = "bitacora_capturas"
+    id             = Column(Integer, primary_key=True, index=True)
+    id_usuario     = Column(Integer, ForeignKey("usuarios.id_usuario"), nullable=False)
+    id_embarcacion = Column(String(50), ForeignKey("embarcaciones.id_embarcacion"), nullable=True)
+    especie        = Column(String(50), nullable=False)
+    kilos          = Column(Float, nullable=False)
+    lat            = Column(Float, nullable=True)
+    lon            = Column(Float, nullable=True)
+    zona_nombre    = Column(String(100), nullable=True)
+    precio_kg      = Column(Float, nullable=True)
+    condicion_mar  = Column(String(20), nullable=True)
+    notas          = Column(String(500), nullable=True)
+    fecha          = Column(DateTime(timezone=True), server_default=func.now())
+
+    usuario     = relationship("Usuario")
+    embarcacion = relationship("Embarcacion")
+
+
+# 9. EVENTOS SOS
+class EventoSOS(Base):
+    __tablename__ = "eventos_sos"
+    id         = Column(Integer, primary_key=True, index=True)
+    id_usuario = Column(Integer, ForeignKey("usuarios.id_usuario"), nullable=False)
+    lat        = Column(Float, nullable=False)
+    lon        = Column(Float, nullable=False)
+    mensaje    = Column(String(300), nullable=True)
+    enviado_ok = Column(Boolean, default=False)
+    fecha      = Column(DateTime(timezone=True), server_default=func.now())
+
+    usuario = relationship("Usuario")

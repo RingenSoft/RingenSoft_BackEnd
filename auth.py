@@ -1,40 +1,41 @@
 import os
-from passlib.context import CryptContext
+import logging
+import bcrypt
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
 from typing import Optional
 
-# --- CONFIGURACIÓN DE SEGURIDAD ---
-SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-in-production-min-32-chars")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 # 24 horas de sesión
+logger = logging.getLogger(__name__)
 
-# Contexto para encriptar contraseñas (Hashing)
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# --- CONFIGURACIÓN DE SEGURIDAD ---
+_DEFAULT_KEY = "dev-only-secret-change-in-production-min-32-chars"
+SECRET_KEY = os.getenv("SECRET_KEY", _DEFAULT_KEY)
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 horas de sesión
+
+if SECRET_KEY == _DEFAULT_KEY:
+    logger.warning(
+        "SECRET_KEY no está configurada. Usando clave de desarrollo. "
+        "Configura la variable de entorno SECRET_KEY antes de desplegar en producción."
+    )
 
 # 1. Funciones de Contraseña
-def verificar_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+def verificar_password(plain_password: str, hashed_password: str) -> bool:
+    return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
 
-def encriptar_password(password):
-    return pwd_context.hash(password)
+def encriptar_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 # 2. Crear Token de Acceso (JWT)
-def crear_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+def crear_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
-    
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 # 3. Decodificar Token (Verificar identidad)
-def decodificar_token(token: str):
+def decodificar_token(token: str) -> Optional[dict]:
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
         return None
